@@ -136,7 +136,7 @@ def main():
             print(f"🔄 Tentativa {attempt}/{MAX_RETRIES} de abrir a planilha...")
             planilha = cliente.open_by_key(SPREADSHEET_ID)
             aba = planilha.worksheet(NOME_ABA)
-            valores = aba.get('A1:AC2000') 
+            valores = aba.get('A1:AC8000') 
             print("✅ Planilha aberta com sucesso.")
             break 
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
