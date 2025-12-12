@@ -10,7 +10,7 @@ import json
 
 # --- Constantes do Script ---
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
-SPREADSHEET_ID = '1nMLHR6Xp5xzQjlhwXufecG1INSQS4KrHn41kqjV9Rmk'
+SPREADSHEET_ID = '1TfzqJZFD3yPNCAXAiLyEw876qjOlitae0pP9TTqNCPI'
 NOME_ABA = 'Tabela dinâmica 2'
 
 # --- FUNÇÃO DE ESPERA ("O PORTÃO") ---
