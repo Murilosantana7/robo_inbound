@@ -7,8 +7,8 @@ import re
 import time
 import os
 import json
-import base64    # <--- NOVO
-import binascii  # <--- NOVO
+import base64
+import binascii
 
 # --- Constantes do Script ---
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
