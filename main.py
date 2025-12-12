@@ -7,6 +7,8 @@ import re
 import time
 import os
 import json
+import base64    # <--- NOVO
+import binascii  # <--- NOVO
 
 # --- Constantes do Script ---
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
@@ -50,18 +52,34 @@ def aguardar_horario_correto():
             
             time.sleep(segundos_para_o_proximo_check)
 
-# --- Função de Autenticação (Com 'retry' embutido) ---
+# --- Função de Autenticação (ATUALIZADA PARA BASE64) ---
 def autenticar_e_criar_cliente():
-    """Autentica usando o Secret do GitHub e já retorna o CLIENTE gspread."""
-    creds_json_str = os.environ.get('GCP_SA_KEY_JSON')
-    if not creds_json_str:
-        print("❌ Erro: Variável de ambiente 'GCP_SA_KEY_JSON' não definida.")
+    """Autentica usando o Secret do GitHub (Base64 ou JSON Puro) e retorna o CLIENTE gspread."""
+    creds_raw = os.environ.get('GCP_SA_KEY_JSON', '').strip()
+    
+    if not creds_raw:
+        print("❌ Erro: Variável de ambiente 'GCP_SA_KEY_JSON' não definida ou vazia.")
         return None
+
+    # Tenta decodificar Base64. Se falhar, assume que já é JSON texto puro.
+    try:
+        # O validate=True garante que só tenta decodificar se parecer Base64 mesmo
+        decoded_bytes = base64.b64decode(creds_raw, validate=True)
+        creds_json_str = decoded_bytes.decode('utf-8')
+        print("ℹ️ Credencial detectada como Base64 e decodificada com sucesso.")
+    except (binascii.Error, ValueError):
+        # Se der erro no decode, significa que provavelmente já é o JSON puro
+        creds_json_str = creds_raw
+        # print("ℹ️ Credencial tratada como JSON puro (não estava em Base64).")
+
     try:
         creds_dict = json.loads(creds_json_str)
         cliente = gspread.service_account_from_dict(creds_dict, scopes=SCOPES)
         print("✅ Cliente gspread autenticado com Service Account.")
         return cliente
+    except json.JSONDecodeError as e:
+        print(f"❌ Erro de formato JSON (O conteúdo decodificado não é um JSON válido): {e}")
+        return None
     except Exception as e:
         print(f"❌ Erro ao autenticar com Service Account: {e}")
         return None
