@@ -19,41 +19,47 @@ SCOPES = [
 SPREADSHEET_ID = '1TfzqJZFD3yPNCAXAiLyEw876qjOlitae0pP9TTqNCPI'
 NOME_ABA = 'Tabela dinâmica 2'
 
-# --- FUNÇÃO DE LEITURA INTELIGENTE (O CORAÇÃO DO SCRIPT) ---
+# --- LEITURA AVANÇADA DE DATAS (COM LIMPEZA DE TEXTO) ---
 def ler_data_universal(valor):
     """
-    Lê datas em qualquer formato (ISO, BR, EUA, Excel) e converte para datetime real.
-    Prioriza dia na frente (formato BR) em caso de dúvida (6/1 = 6 de Jan).
+    Procura datas dentro de células sujas (Ex: '2026-01-06 13:08 LH - Inbound')
+    e converte para datetime válido.
     """
     valor_str = str(valor).strip()
     
-    # Lista de termos que indicam dado vazio ou inválido
     if not valor_str or valor_str.lower() in ['nat', 'nan', 'none', '', '--', '-', 'null']:
         return pd.NaT
 
     try:
-        # 1. Tenta formato ISO direto (YYYY-MM-DD) - Comum em sistemas
-        if '-' in valor_str:
-            return pd.to_datetime(valor_str, format='mixed', dayfirst=False)
+        # 1. TENTA ENCONTRAR PADRÃO ISO (2026-01-06 13:08) NO MEIO DO TEXTO
+        # A regex procura: 4 digitos - 2 digitos - 2 digitos espaço 2 dig : 2 dig
+        match_iso = re.search(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2})', valor_str)
+        if match_iso:
+            return pd.to_datetime(match_iso.group(1), format='mixed', dayfirst=False)
         
-        # 2. Tenta formato Brasileiro (DD/MM/YYYY) - Comum no Excel BR
-        # O segredo é o dayfirst=True, que força 06/01 a ser 6 de Janeiro
-        return pd.to_datetime(valor_str, dayfirst=True)
+        # 2. TENTA ENCONTRAR PADRÃO BR (06/01/2026 13:08) NO MEIO DO TEXTO
+        match_br = re.search(r'(\d{1,2}/\d{1,2}/\d{2,4} \d{2}:\d{2})', valor_str)
+        if match_br:
+            return pd.to_datetime(match_br.group(1), dayfirst=True)
+            
+        # 3. Tenta conversão direta se não achou padrão específico (fallback)
+        return pd.to_datetime(valor_str, dayfirst=True, errors='coerce')
     
     except:
         return pd.NaT
 
-# --- AUXILIARES DE FORMATAÇÃO (SAÍDA) ---
+# --- AUXILIARES ---
 def formatar_saida_data(data_obj):
-    """Garante a saída estrita: 06/01 13:00"""
+    """Garante saída visual: 06/01 13:00"""
     if pd.isna(data_obj):
         return "--/-- --:--"
     return data_obj.strftime('%d/%m %H:%M')
 
 def minutos_para_hhmm(minutos):
-    """Garante a saída estrita: 10:36h"""
-    # Tratamento para evitar negativos absurdos por erro de fuso
-    if minutos < -1000: minutos = 0 # Zera se for erro grosseiro (-3000h)
+    """Garante saída visual: 10:36h"""
+    # Proteção contra erros de fuso gigantes
+    if minutos is None: return "--:--h"
+    if minutos < -1000: minutos = 0 
     
     sinal = "-" if minutos < 0 else ""
     minutos = abs(minutos)
@@ -73,7 +79,6 @@ def enviar_webhook(mensagem_txt):
         print("❌ Erro: 'SEATALK_WEBHOOK_URL' não definida.")
         return
 
-    # Limpeza para evitar quebra do JSON
     mensagem_limpa = str(mensagem_txt).replace('"', "'").replace('\\', '/')
     conteudo_formatado = f"```\n{mensagem_limpa}\n```"
 
@@ -105,7 +110,7 @@ def autenticar():
         decoded = base64.b64decode(creds_raw, validate=True).decode('utf-8')
         creds_dict = json.loads(decoded)
     except:
-        creds_dict = json.loads(creds_raw) # Já era JSON puro
+        creds_dict = json.loads(creds_raw)
 
     try:
         creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
@@ -114,9 +119,9 @@ def autenticar():
         print(f"❌ Erro Auth: {e}")
         return None
 
-# --- LÓGICA DE TEMPO E TURNOS ---
+# --- LÓGICA DE TEMPO ---
 def get_agora_br():
-    # Retorna hora atual BR arredondada (sem segundos)
+    # Hora Brasil (UTC-3)
     return (datetime.utcnow() - timedelta(hours=3)).replace(second=0, microsecond=0)
 
 def turno_atual():
@@ -140,12 +145,13 @@ def periodo_dia_filtro(agora_br):
 
 # --- MAIN ---
 def main():
-    print(f"🔄 Script Universal Iniciado.")
+    print(f"🔄 Script Final (Com Limpeza de Texto) Iniciado.")
     client = autenticar()
     if not client: return
 
     try:
         sheet = client.open_by_key(SPREADSHEET_ID).worksheet(NOME_ABA)
+        # Pega dados brutos
         raw_data = sheet.get('A1:AC8000')
         print("✅ Dados baixados.")
     except Exception as e:
@@ -158,7 +164,7 @@ def main():
     df = pd.DataFrame(raw_data[1:], columns=raw_data[0])
     df.columns = [c.strip() for c in df.columns]
 
-    # Mapeamento de Colunas
+    # Mapeamento
     try:
         col_eta = raw_data[0][1].strip()      # B
         col_chegada = raw_data[0][3].strip()  # D
@@ -168,31 +174,28 @@ def main():
         print("❌ Erro estrutura colunas.")
         return
 
-    # Normalização de Nomes
     if col_eta != 'ETA Planejado': df.rename(columns={col_eta: 'ETA Planejado'}, inplace=True)
 
-    # --- APLICAÇÃO DA LEITURA UNIVERSAL ---
-    print("🛠️ Convertendo datas mistas...")
+    # --- APLICAÇÃO DA LIMPEZA ---
+    print("🛠️ Limpando textos das datas...")
     df['Add to Queue Time'] = df['Add to Queue Time'].apply(ler_data_universal)
     df['ETA Planejado'] = df['ETA Planejado'].apply(ler_data_universal)
+    # Garante que a coluna usada para exibição "Cheg" também seja limpa
     df[col_chegada] = df[col_chegada].apply(ler_data_universal)
-    # --------------------------------------
+    # ----------------------------
 
     df[col_pacotes] = pd.to_numeric(df[col_pacotes], errors='coerce').fillna(0).astype(int)
     
-    # Limpeza de Strings
     cols_str = ['Satus 2.0', 'Doca', 'Turno 2', col_origem, 'LH Trip Nnumber']
     for c in cols_str:
         if c in df.columns: df[c] = df[c].astype(str).str.strip().fillna('')
 
-    # Filtros
     df['Satus 2.0'] = df['Satus 2.0'].replace({
         'Pendente Recepção': 'pendente recepção', 
         'Pendente De Chegada': 'pendente de chegada'
     })
     df = df[~df['Satus 2.0'].str.lower().str.contains('finalizado', na=False)]
 
-    # Referência de Tempo (Brasil)
     agora = get_agora_br()
     inicio_dia, fim_dia = periodo_dia_filtro(agora)
 
@@ -206,36 +209,33 @@ def main():
         eta_val = row['ETA Planejado']
         chegada_val = row[col_chegada]
         
-        # Lógica Pendentes
+        # Pendentes
         if status in status_pend and pd.notna(eta_val) and inicio_dia <= eta_val <= fim_dia:
             t = row['Turno 2']
             if t not in pendentes: pendentes[t] = {'lts':0, 'pct':0}
             pendentes[t]['lts'] += 1
             pendentes[t]['pct'] += row[col_pacotes]
 
-        # Lógica Tempo de Pátio
+        # Tempo de Pátio
         entrada = row['Add to Queue Time']
         minutos = None
         if pd.notna(entrada):
-            # Como convertemos tudo para datetime sem fuso (naive) e 'agora' também é naive BR,
-            # a subtração funciona direto.
+            # CÁLCULO DO TEMPO: AGORA (BR) - ENTRADA (Lida da planilha)
             minutos = int((agora - entrada).total_seconds() / 60)
 
-        # --- MONTAGEM DAS STRINGS (AQUI APLICAMOS SEU PEDIDO DE FORMATO) ---
-        eta_fmt = formatar_saida_data(eta_val)      # Sai como 06/01 13:00
-        cheg_fmt = formatar_saida_data(chegada_val) # Sai como 06/01 13:00
-        tempo_fmt = minutos_para_hhmm(minutos) if minutos is not None else "--:--h" # Sai como 10:36h
+        # Formatação Visual
+        eta_fmt = formatar_saida_data(eta_val)
+        cheg_fmt = formatar_saida_data(chegada_val) # Agora vai funcionar!
+        tempo_fmt = minutos_para_hhmm(minutos)
 
         linha = f"- {trip} | Doca: {padronizar_doca(row['Doca'])} | ETA: {eta_fmt} | Cheg: {cheg_fmt} | Tempo: {tempo_fmt} | {origem}"
         linha_fila = f"- {trip} | ETA: {eta_fmt} | Cheg: {cheg_fmt} | Tempo: {tempo_fmt} | {origem}"
-        # ------------------------------------------------------------------
 
         if status == 'em doca' and minutos is not None:
             em_doca.append((minutos, linha))
         elif 'fila' in status and minutos is not None:
             em_fila.append((minutos, linha_fila))
 
-    # Ordenação e Output
     em_doca.sort(key=lambda x: x[0], reverse=True)
     em_fila.sort(key=lambda x: x[0], reverse=True)
     
