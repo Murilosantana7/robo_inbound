@@ -19,17 +19,15 @@ SCOPES = [
 SPREADSHEET_ID = '1TfzqJZFD3yPNCAXAiLyEw876qjOlitae0pP9TTqNCPI'
 NOME_ABA = 'Tabela dinâmica 2'
 
-# --- FUNÇÃO DE WEBHOOK (BLINDADA) ---
+# --- FUNÇÃO DE WEBHOOK ---
 def enviar_webhook(mensagem_txt):
     webhook_url = os.environ.get('SEATALK_WEBHOOK_URL') 
     if not webhook_url:
         print("❌ Erro: 'SEATALK_WEBHOOK_URL' não definida.")
         return
 
-    # Limpeza de Segurança
+    # Limpeza básica e formatação
     mensagem_limpa = str(mensagem_txt).replace('"', "'").replace('\\', '/')
-    
-    # Formatação visual (Bloco de Código)
     conteudo_formatado = f"```\n{mensagem_limpa}\n```"
 
     payload = {
@@ -50,7 +48,7 @@ def enviar_webhook(mensagem_txt):
     except Exception as e:
         print(f"❌ Falha crítica ao enviar webhook: {e}")
 
-# --- Autenticação (google-auth) ---
+# --- Autenticação ---
 def autenticar_e_criar_cliente():
     creds_raw = os.environ.get('GCP_SA_KEY_JSON', '').strip()
     if not creds_raw:
@@ -73,11 +71,13 @@ def autenticar_e_criar_cliente():
         print(f"❌ Erro na autenticação: {e}")
         return None
 
-# --- Funções Auxiliares ---
+# --- Auxiliares ---
 def minutos_para_hhmm(minutos):
+    sinal = "-" if minutos < 0 else ""
+    minutos = abs(minutos)
     horas = minutos // 60
     mins = minutos % 60
-    return f"{horas:02d}:{mins:02d}h"
+    return f"{sinal}{horas:02d}:{mins:02d}h"
 
 def turno_atual():
     agora_br = datetime.utcnow() - timedelta(hours=3)
@@ -94,10 +94,10 @@ def ordenar_turnos(pendentes_por_turno):
     turnos_existentes = {k: v for k, v in pendentes_por_turno.items() if k in nova_ordem}
     return sorted(turnos_existentes.items(), key=lambda x: nova_ordem.index(x[0]))
 
-def periodo_dia_customizado(agora_utc):
-    hoje = agora_utc.date()
+def periodo_dia_customizado(agora_br):
+    hoje = agora_br.date()
     inicio_dia = datetime.combine(hoje, dt_time(6, 0))
-    if agora_utc < inicio_dia:
+    if agora_br < inicio_dia:
         inicio_dia -= timedelta(days=1)
     fim_dia = inicio_dia + timedelta(days=1) - timedelta(seconds=1)
     return inicio_dia, fim_dia
@@ -109,7 +109,7 @@ def padronizar_doca(doca_str):
 
 # --- MAIN ---
 def main():
-    print(f"🔄 Script de Monitoramento Iniciado (Sem espera).")
+    print(f"🔄 Script de Monitoramento Iniciado.")
     cliente = autenticar_e_criar_cliente()
     if not cliente: return
 
@@ -132,10 +132,10 @@ def main():
     df.columns = [col.strip() for col in df.columns]
 
     try:
-        header_eta = valores[0][1].strip() # B
-        header_origem = valores[0][28].strip() # AC
-        header_chegada = valores[0][3].strip() # D
-        header_pacotes = valores[0][5].strip() # F
+        header_eta = valores[0][1].strip() 
+        header_origem = valores[0][28].strip() 
+        header_chegada = valores[0][3].strip() 
+        header_pacotes = valores[0][5].strip() 
     except IndexError:
         print("❌ Erro: Estrutura da planilha mudou.")
         return
@@ -143,10 +143,19 @@ def main():
     if header_eta != 'ETA Planejado':
         df.rename(columns={header_eta: 'ETA Planejado'}, inplace=True)
 
-    # Conversão Flexível de Datas
-    df['Add to Queue Time'] = pd.to_datetime(df['Add to Queue Time'], dayfirst=True, errors='coerce')
-    df['ETA Planejado'] = pd.to_datetime(df['ETA Planejado'], dayfirst=True, errors='coerce')
-    df[header_chegada] = pd.to_datetime(df[header_chegada], dayfirst=True, errors='coerce')
+    # --- CORREÇÃO DE DATAS E FORMATOS ---
+    # 1. Converte tudo para string primeiro para limpar sujeira
+    # 2. dayfirst=True obriga o Python a entender 06/01 como 6 de Janeiro, não 1 de Junho
+    
+    colunas_data = ['Add to Queue Time', 'ETA Planejado', header_chegada]
+    
+    for col in colunas_data:
+        if col in df.columns:
+            # Força conversão para string, remove espaços
+            df[col] = df[col].astype(str).str.strip()
+            # Converte para data forçando DIA PRIMEIRO (dd/mm/aaaa)
+            df[col] = pd.to_datetime(df[col], dayfirst=True, errors='coerce')
+
     df[header_pacotes] = pd.to_numeric(df[header_pacotes], errors='coerce').fillna(0).astype(int)
     
     cols_string = ['Satus 2.0', 'Doca', 'Turno 2', header_origem, 'LH Trip Nnumber']
@@ -157,8 +166,12 @@ def main():
     df['Satus 2.0'] = df['Satus 2.0'].replace({'Pendente Recepção': 'pendente recepção', 'Pendente De Chegada': 'pendente de chegada'})
     df = df[~df['Satus 2.0'].str.lower().str.contains('finalizado', na=False)]
 
-    agora_utc = datetime.utcnow().replace(second=0, microsecond=0)
-    inicio_dia, fim_dia = periodo_dia_customizado(agora_utc)
+    # --- CORREÇÃO DE FUSO PARA CÁLCULO ---
+    # Agora usamos 'agora_br' para comparar banana com banana (Horário Brasil vs Planilha Brasil)
+    agora_br = datetime.utcnow() - timedelta(hours=3)
+    agora_br = agora_br.replace(second=0, microsecond=0) # Remove segundos para arredondar
+    
+    inicio_dia, fim_dia = periodo_dia_customizado(agora_br)
 
     em_doca, em_fila, pendentes_por_turno = [], [], {}
     pendentes_status = ['pendente de chegada', 'pendente recepção']
@@ -180,13 +193,17 @@ def main():
         entrada_cd = row['Add to Queue Time']
         doca = row['Doca'] if row['Doca'] else '--'
         
-        # Formatação de saída forçada para dd/mm HH:MM
+        # Formata para sair bonitinho na mensagem (DD/MM HH:MM)
         eta_str = row['ETA Planejado'].strftime('%d/%m %H:%M') if pd.notna(row['ETA Planejado']) else '--/-- --:--'
+        # Usa o header correto da coluna D
         chegada_str = row[header_chegada].strftime('%d/%m %H:%M') if pd.notna(row[header_chegada]) else '--/-- --:--'
         
         minutos = None
         if pd.notna(entrada_cd):
-            minutos = int((agora_utc - entrada_cd).total_seconds() / 60)
+            # Calcula a diferença usando AGORA BRASIL (sem fuso UTC no meio)
+            # Como ambos são 'naive' (sem info de fuso), a conta fecha.
+            diff = agora_br - entrada_cd
+            minutos = int(diff.total_seconds() / 60)
 
         if status == 'em doca' and minutos is not None:
             msg_doca = f"- {trip} | Doca: {padronizar_doca(doca)} | ETA: {eta_str} | Cheg: {chegada_str} | Tempo: {minutos_para_hhmm(minutos)} | {origem}"
@@ -222,7 +239,6 @@ def main():
     enviar_webhook(mensagem_final)
 
 if __name__ == '__main__':
-    # Executa imediatamente
     try:
         main()
     except Exception as e:
