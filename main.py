@@ -11,7 +11,7 @@ import json
 import base64
 import binascii
 
-# --- Constantes do Script ---
+# --- Configurações ---
 SCOPES = [
     'https://www.googleapis.com/auth/spreadsheets',
     'https://www.googleapis.com/auth/drive'
@@ -19,14 +19,61 @@ SCOPES = [
 SPREADSHEET_ID = '1TfzqJZFD3yPNCAXAiLyEw876qjOlitae0pP9TTqNCPI'
 NOME_ABA = 'Tabela dinâmica 2'
 
-# --- FUNÇÃO DE WEBHOOK ---
+# --- FUNÇÃO DE LEITURA INTELIGENTE (O CORAÇÃO DO SCRIPT) ---
+def ler_data_universal(valor):
+    """
+    Lê datas em qualquer formato (ISO, BR, EUA, Excel) e converte para datetime real.
+    Prioriza dia na frente (formato BR) em caso de dúvida (6/1 = 6 de Jan).
+    """
+    valor_str = str(valor).strip()
+    
+    # Lista de termos que indicam dado vazio ou inválido
+    if not valor_str or valor_str.lower() in ['nat', 'nan', 'none', '', '--', '-', 'null']:
+        return pd.NaT
+
+    try:
+        # 1. Tenta formato ISO direto (YYYY-MM-DD) - Comum em sistemas
+        if '-' in valor_str:
+            return pd.to_datetime(valor_str, format='mixed', dayfirst=False)
+        
+        # 2. Tenta formato Brasileiro (DD/MM/YYYY) - Comum no Excel BR
+        # O segredo é o dayfirst=True, que força 06/01 a ser 6 de Janeiro
+        return pd.to_datetime(valor_str, dayfirst=True)
+    
+    except:
+        return pd.NaT
+
+# --- AUXILIARES DE FORMATAÇÃO (SAÍDA) ---
+def formatar_saida_data(data_obj):
+    """Garante a saída estrita: 06/01 13:00"""
+    if pd.isna(data_obj):
+        return "--/-- --:--"
+    return data_obj.strftime('%d/%m %H:%M')
+
+def minutos_para_hhmm(minutos):
+    """Garante a saída estrita: 10:36h"""
+    # Tratamento para evitar negativos absurdos por erro de fuso
+    if minutos < -1000: minutos = 0 # Zera se for erro grosseiro (-3000h)
+    
+    sinal = "-" if minutos < 0 else ""
+    minutos = abs(minutos)
+    horas = minutos // 60
+    mins = minutos % 60
+    return f"{sinal}{horas:02d}:{mins:02d}h"
+
+def padronizar_doca(doca_str):
+    if not isinstance(doca_str, str): return "--"
+    match = re.search(r'(\d+)$', doca_str)
+    return match.group(1) if match else "--"
+
+# --- WEBHOOK ---
 def enviar_webhook(mensagem_txt):
     webhook_url = os.environ.get('SEATALK_WEBHOOK_URL') 
     if not webhook_url:
         print("❌ Erro: 'SEATALK_WEBHOOK_URL' não definida.")
         return
 
-    # Limpeza básica e formatação
+    # Limpeza para evitar quebra do JSON
     mensagem_limpa = str(mensagem_txt).replace('"', "'").replace('\\', '/')
     conteudo_formatado = f"```\n{mensagem_limpa}\n```"
 
@@ -39,207 +86,182 @@ def enviar_webhook(mensagem_txt):
     }
 
     try:
-        print("📤 Enviando mensagem para o Seatalk...")
+        print("📤 Enviando mensagem...")
         response = requests.post(webhook_url, json=payload, timeout=15)
         if response.status_code != 200 or ("code" in response.text and response.json().get('code') != 0):
             print(f"❌ Erro no envio: {response.text}")
         else:
-            print("✅ Mensagem enviada com sucesso.")
+            print("✅ Sucesso.")
     except Exception as e:
-        print(f"❌ Falha crítica ao enviar webhook: {e}")
+        print(f"❌ Falha crítica webhook: {e}")
 
-# --- Autenticação ---
-def autenticar_e_criar_cliente():
+# --- AUTENTICAÇÃO ---
+def autenticar():
     creds_raw = os.environ.get('GCP_SA_KEY_JSON', '').strip()
     if not creds_raw:
-        print("❌ Erro: 'GCP_SA_KEY_JSON' vazia.")
+        print("❌ Erro: Variável de credenciais vazia.")
         return None
+    try:
+        decoded = base64.b64decode(creds_raw, validate=True).decode('utf-8')
+        creds_dict = json.loads(decoded)
+    except:
+        creds_dict = json.loads(creds_raw) # Já era JSON puro
 
     try:
-        decoded_bytes = base64.b64decode(creds_raw, validate=True)
-        creds_json_str = decoded_bytes.decode('utf-8')
-    except (binascii.Error, ValueError):
-        creds_json_str = creds_raw
-
-    try:
-        creds_dict = json.loads(creds_json_str)
         creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
-        cliente = gspread.authorize(creds)
-        print("✅ Cliente autenticado (google.oauth2).")
-        return cliente
+        return gspread.authorize(creds)
     except Exception as e:
-        print(f"❌ Erro na autenticação: {e}")
+        print(f"❌ Erro Auth: {e}")
         return None
 
-# --- Auxiliares ---
-def minutos_para_hhmm(minutos):
-    sinal = "-" if minutos < 0 else ""
-    minutos = abs(minutos)
-    horas = minutos // 60
-    mins = minutos % 60
-    return f"{sinal}{horas:02d}:{mins:02d}h"
+# --- LÓGICA DE TEMPO E TURNOS ---
+def get_agora_br():
+    # Retorna hora atual BR arredondada (sem segundos)
+    return (datetime.utcnow() - timedelta(hours=3)).replace(second=0, microsecond=0)
 
 def turno_atual():
-    agora_br = datetime.utcnow() - timedelta(hours=3)
-    hora_atual = agora_br.time()
-    if hora_atual >= dt_time(6, 0) and hora_atual < dt_time(14, 0): return "T1"
-    elif hora_atual >= dt_time(14, 0) and hora_atual < dt_time(22, 0): return "T2"
+    hora = get_agora_br().time()
+    if hora >= dt_time(6, 0) and hora < dt_time(14, 0): return "T1"
+    elif hora >= dt_time(14, 0) and hora < dt_time(22, 0): return "T2"
     else: return "T3"
 
-def ordenar_turnos(pendentes_por_turno):
-    ordem_turnos = ['T1', 'T2', 'T3']
-    t_atual = turno_atual()
-    idx = ordem_turnos.index(t_atual)
-    nova_ordem = ordem_turnos[idx:] + ordem_turnos[:idx]
-    turnos_existentes = {k: v for k, v in pendentes_por_turno.items() if k in nova_ordem}
-    return sorted(turnos_existentes.items(), key=lambda x: nova_ordem.index(x[0]))
+def ordenar_turnos(pendentes):
+    ordem = ['T1', 'T2', 'T3']
+    idx = ordem.index(turno_atual())
+    nova_ordem = ordem[idx:] + ordem[:idx]
+    return sorted([i for i in pendentes.items() if i[0] in nova_ordem], key=lambda x: nova_ordem.index(x[0]))
 
-def periodo_dia_customizado(agora_br):
+def periodo_dia_filtro(agora_br):
     hoje = agora_br.date()
-    inicio_dia = datetime.combine(hoje, dt_time(6, 0))
-    if agora_br < inicio_dia:
-        inicio_dia -= timedelta(days=1)
-    fim_dia = inicio_dia + timedelta(days=1) - timedelta(seconds=1)
-    return inicio_dia, fim_dia
-
-def padronizar_doca(doca_str):
-    if not isinstance(doca_str, str): return "--"
-    match = re.search(r'(\d+)$', doca_str)
-    return match.group(1) if match else "--"
+    inicio = datetime.combine(hoje, dt_time(6, 0))
+    if agora_br < inicio: inicio -= timedelta(days=1)
+    fim = inicio + timedelta(days=1) - timedelta(seconds=1)
+    return inicio, fim
 
 # --- MAIN ---
 def main():
-    print(f"🔄 Script de Monitoramento Iniciado.")
-    cliente = autenticar_e_criar_cliente()
-    if not cliente: return
+    print(f"🔄 Script Universal Iniciado.")
+    client = autenticar()
+    if not client: return
 
     try:
-        planilha = cliente.open_by_key(SPREADSHEET_ID)
-        aba = planilha.worksheet(NOME_ABA)
-        valores = aba.get('A1:AC8000') 
-        print("✅ Dados baixados da planilha.")
+        sheet = client.open_by_key(SPREADSHEET_ID).worksheet(NOME_ABA)
+        raw_data = sheet.get('A1:AC8000')
+        print("✅ Dados baixados.")
     except Exception as e:
-        msg_erro = f"Erro crítico ao ler planilha: {e}"
-        print(f"❌ {msg_erro}")
-        enviar_webhook(msg_erro)
+        print(f"❌ Erro planilha: {e}")
+        enviar_webhook(f"Erro ao ler planilha: {e}")
         return
 
-    if not valores:
-        print("❌ A planilha retornou vazia.")
-        return
-    
-    df = pd.DataFrame(valores[1:], columns=valores[0])
-    df.columns = [col.strip() for col in df.columns]
+    if not raw_data: return
 
+    df = pd.DataFrame(raw_data[1:], columns=raw_data[0])
+    df.columns = [c.strip() for c in df.columns]
+
+    # Mapeamento de Colunas
     try:
-        header_eta = valores[0][1].strip() 
-        header_origem = valores[0][28].strip() 
-        header_chegada = valores[0][3].strip() 
-        header_pacotes = valores[0][5].strip() 
-    except IndexError:
-        print("❌ Erro: Estrutura da planilha mudou.")
+        col_eta = raw_data[0][1].strip()      # B
+        col_chegada = raw_data[0][3].strip()  # D
+        col_pacotes = raw_data[0][5].strip()  # F
+        col_origem = raw_data[0][28].strip()  # AC
+    except:
+        print("❌ Erro estrutura colunas.")
         return
 
-    if header_eta != 'ETA Planejado':
-        df.rename(columns={header_eta: 'ETA Planejado'}, inplace=True)
+    # Normalização de Nomes
+    if col_eta != 'ETA Planejado': df.rename(columns={col_eta: 'ETA Planejado'}, inplace=True)
 
-    # --- CORREÇÃO DE DATAS E FORMATOS ---
-    # 1. Converte tudo para string primeiro para limpar sujeira
-    # 2. dayfirst=True obriga o Python a entender 06/01 como 6 de Janeiro, não 1 de Junho
-    
-    colunas_data = ['Add to Queue Time', 'ETA Planejado', header_chegada]
-    
-    for col in colunas_data:
-        if col in df.columns:
-            # Força conversão para string, remove espaços
-            df[col] = df[col].astype(str).str.strip()
-            # Converte para data forçando DIA PRIMEIRO (dd/mm/aaaa)
-            df[col] = pd.to_datetime(df[col], dayfirst=True, errors='coerce')
+    # --- APLICAÇÃO DA LEITURA UNIVERSAL ---
+    print("🛠️ Convertendo datas mistas...")
+    df['Add to Queue Time'] = df['Add to Queue Time'].apply(ler_data_universal)
+    df['ETA Planejado'] = df['ETA Planejado'].apply(ler_data_universal)
+    df[col_chegada] = df[col_chegada].apply(ler_data_universal)
+    # --------------------------------------
 
-    df[header_pacotes] = pd.to_numeric(df[header_pacotes], errors='coerce').fillna(0).astype(int)
+    df[col_pacotes] = pd.to_numeric(df[col_pacotes], errors='coerce').fillna(0).astype(int)
     
-    cols_string = ['Satus 2.0', 'Doca', 'Turno 2', header_origem, 'LH Trip Nnumber']
-    for col in cols_string:
-        if col in df.columns:
-            df[col] = df[col].astype(str).str.strip().fillna('')
+    # Limpeza de Strings
+    cols_str = ['Satus 2.0', 'Doca', 'Turno 2', col_origem, 'LH Trip Nnumber']
+    for c in cols_str:
+        if c in df.columns: df[c] = df[c].astype(str).str.strip().fillna('')
 
-    df['Satus 2.0'] = df['Satus 2.0'].replace({'Pendente Recepção': 'pendente recepção', 'Pendente De Chegada': 'pendente de chegada'})
+    # Filtros
+    df['Satus 2.0'] = df['Satus 2.0'].replace({
+        'Pendente Recepção': 'pendente recepção', 
+        'Pendente De Chegada': 'pendente de chegada'
+    })
     df = df[~df['Satus 2.0'].str.lower().str.contains('finalizado', na=False)]
 
-    # --- CORREÇÃO DE FUSO PARA CÁLCULO ---
-    # Agora usamos 'agora_br' para comparar banana com banana (Horário Brasil vs Planilha Brasil)
-    agora_br = datetime.utcnow() - timedelta(hours=3)
-    agora_br = agora_br.replace(second=0, microsecond=0) # Remove segundos para arredondar
-    
-    inicio_dia, fim_dia = periodo_dia_customizado(agora_br)
+    # Referência de Tempo (Brasil)
+    agora = get_agora_br()
+    inicio_dia, fim_dia = periodo_dia_filtro(agora)
 
-    em_doca, em_fila, pendentes_por_turno = [], [], {}
-    pendentes_status = ['pendente de chegada', 'pendente recepção']
+    em_doca, em_fila, pendentes = [], [], {}
+    status_pend = ['pendente de chegada', 'pendente recepção']
 
     for _, row in df.iterrows():
         trip = row['LH Trip Nnumber']
         status = row['Satus 2.0'].lower()
-        origem = row[header_origem] if row[header_origem] else '--'
-        pacotes = row[header_pacotes]
-        eta_pendente = row['ETA Planejado']
-        turno = row['Turno 2']
+        origem = row[col_origem] if row[col_origem] else '--'
+        eta_val = row['ETA Planejado']
+        chegada_val = row[col_chegada]
+        
+        # Lógica Pendentes
+        if status in status_pend and pd.notna(eta_val) and inicio_dia <= eta_val <= fim_dia:
+            t = row['Turno 2']
+            if t not in pendentes: pendentes[t] = {'lts':0, 'pct':0}
+            pendentes[t]['lts'] += 1
+            pendentes[t]['pct'] += row[col_pacotes]
 
-        if status in pendentes_status and pd.notna(eta_pendente) and inicio_dia <= eta_pendente <= fim_dia:
-            if turno not in pendentes_por_turno:
-                pendentes_por_turno[turno] = {'lts': 0, 'pacotes': 0}
-            pendentes_por_turno[turno]['lts'] += 1
-            pendentes_por_turno[turno]['pacotes'] += pacotes 
-            
-        entrada_cd = row['Add to Queue Time']
-        doca = row['Doca'] if row['Doca'] else '--'
-        
-        # Formata para sair bonitinho na mensagem (DD/MM HH:MM)
-        eta_str = row['ETA Planejado'].strftime('%d/%m %H:%M') if pd.notna(row['ETA Planejado']) else '--/-- --:--'
-        # Usa o header correto da coluna D
-        chegada_str = row[header_chegada].strftime('%d/%m %H:%M') if pd.notna(row[header_chegada]) else '--/-- --:--'
-        
+        # Lógica Tempo de Pátio
+        entrada = row['Add to Queue Time']
         minutos = None
-        if pd.notna(entrada_cd):
-            # Calcula a diferença usando AGORA BRASIL (sem fuso UTC no meio)
-            # Como ambos são 'naive' (sem info de fuso), a conta fecha.
-            diff = agora_br - entrada_cd
-            minutos = int(diff.total_seconds() / 60)
+        if pd.notna(entrada):
+            # Como convertemos tudo para datetime sem fuso (naive) e 'agora' também é naive BR,
+            # a subtração funciona direto.
+            minutos = int((agora - entrada).total_seconds() / 60)
+
+        # --- MONTAGEM DAS STRINGS (AQUI APLICAMOS SEU PEDIDO DE FORMATO) ---
+        eta_fmt = formatar_saida_data(eta_val)      # Sai como 06/01 13:00
+        cheg_fmt = formatar_saida_data(chegada_val) # Sai como 06/01 13:00
+        tempo_fmt = minutos_para_hhmm(minutos) if minutos is not None else "--:--h" # Sai como 10:36h
+
+        linha = f"- {trip} | Doca: {padronizar_doca(row['Doca'])} | ETA: {eta_fmt} | Cheg: {cheg_fmt} | Tempo: {tempo_fmt} | {origem}"
+        linha_fila = f"- {trip} | ETA: {eta_fmt} | Cheg: {cheg_fmt} | Tempo: {tempo_fmt} | {origem}"
+        # ------------------------------------------------------------------
 
         if status == 'em doca' and minutos is not None:
-            msg_doca = f"- {trip} | Doca: {padronizar_doca(doca)} | ETA: {eta_str} | Cheg: {chegada_str} | Tempo: {minutos_para_hhmm(minutos)} | {origem}"
-            em_doca.append((minutos, msg_doca))
+            em_doca.append((minutos, linha))
         elif 'fila' in status and minutos is not None:
-            msg_fila = f"- {trip} | ETA: {eta_str} | Cheg: {chegada_str} | Tempo: {minutos_para_hhmm(minutos)} | {origem}"
-            em_fila.append((minutos, msg_fila))
+            em_fila.append((minutos, linha_fila))
 
+    # Ordenação e Output
     em_doca.sort(key=lambda x: x[0], reverse=True)
     em_fila.sort(key=lambda x: x[0], reverse=True)
-    mensagem = []
-
+    
+    msg = []
     if em_doca:
-        mensagem.append(f"🚛 Em Doca: {len(em_doca)} LT(s)\n" + "\n".join([x[1] for x in em_doca]))
+        msg.append(f"🚛 Em Doca: {len(em_doca)} LT(s)\n" + "\n".join([x[1] for x in em_doca]))
     if em_fila:
-        mensagem.append(f"🔴 Em Fila: {len(em_fila)} LT(s)\n" + "\n".join([x[1] for x in em_fila]))
+        msg.append(f"🔴 Em Fila: {len(em_fila)} LT(s)\n" + "\n".join([x[1] for x in em_fila]))
 
-    total_lts = sum(d['lts'] for d in pendentes_por_turno.values())
-    total_pkgs = sum(d['pacotes'] for d in pendentes_por_turno.values())
-
+    total_lts = sum(p['lts'] for p in pendentes.values())
     if total_lts > 0:
-        mensagem.append(f"⏳ Pendentes: {total_lts} LT(s) ({total_pkgs} pct)")
-        for turno, dados in ordenar_turnos(pendentes_por_turno):
-            mensagem.append(f"- {dados['lts']} LTs ({dados['pacotes']} pct) no {turno}")
+        total_pct = sum(p['pct'] for p in pendentes.values())
+        msg.append(f"⏳ Pendentes: {total_lts} LT(s) ({total_pct} pct)")
+        for t, d in ordenar_turnos(pendentes):
+            msg.append(f"- {d['lts']} LTs ({d['pct']} pct) no {t}")
     elif not em_doca and not em_fila:
-        mensagem.append("✅ Nenhuma pendência no momento.")
+        msg.append("✅ Nenhuma pendência.")
 
-    if not mensagem:
-        print("ℹ️ Nenhuma mensagem relevante.")
-        return
-
-    mensagem_final = "Segue as LH´s com mais tempo de Pátio:\n\n" + "\n\n".join(mensagem)
-    enviar_webhook(mensagem_final)
+    if msg:
+        texto_final = "Segue as LH´s com mais tempo de Pátio:\n\n" + "\n\n".join(msg)
+        enviar_webhook(texto_final)
+    else:
+        print("ℹ️ Nada a enviar.")
 
 if __name__ == '__main__':
     try:
         main()
     except Exception as e:
-        print(f"❌ Erro Crítico Main: {e}")
+        print(f"❌ Erro Main: {e}")
