@@ -2,7 +2,7 @@
 import pandas as pd
 import gspread
 import requests
-from google.oauth2.service_account import Credentials # <--- IMPORTAÇÃO NOVA E CRÍTICA
+from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta, time as dt_time
 import re
 import time
@@ -12,7 +12,6 @@ import base64
 import binascii
 
 # --- Constantes do Script ---
-# Adicionado o escopo 'drive' para garantir que o token de acesso seja gerado corretamente
 SCOPES = [
     'https://www.googleapis.com/auth/spreadsheets',
     'https://www.googleapis.com/auth/drive'
@@ -20,21 +19,48 @@ SCOPES = [
 SPREADSHEET_ID = '1TfzqJZFD3yPNCAXAiLyEw876qjOlitae0pP9TTqNCPI'
 NOME_ABA = 'Tabela dinâmica 2'
 
-# --- FUNÇÃO DE WEBHOOK (BLINDADA) ---
+# --- FUNÇÃO DE ESPERA ("O PORTÃO") ---
+def aguardar_horario_correto():
+    """
+    Verifica se é hora cheia (XX:00) ou meia hora (XX:30) no fuso UTC.
+    """
+    print(f"Iniciando verificação de horário às {datetime.utcnow().strftime('%H:%M:%S')} (Fuso UTC)")
+    
+    while True:
+        agora_utc = datetime.utcnow()
+        minutos_atuais = agora_utc.minute
+        
+        if minutos_atuais == 0 or minutos_atuais == 30:
+            print(f"✅ 'Portão' aberto: {agora_utc.strftime('%H:%M:%S')} UTC")
+            print("Iniciando coleta de dados...")
+            break
+        else:
+            if minutos_atuais < 30:
+                minutos_faltando = 30 - minutos_atuais
+                proximo_horario_str = f"{agora_utc.hour:02d}:30"
+            else:
+                minutos_faltando = 60 - minutos_atuais
+                proxima_hora = (agora_utc.hour + 1) % 24
+                proximo_horario_str = f"{proxima_hora:02d}:00"
+            
+            segundos_para_o_proximo_check = 30 - (agora_utc.second % 30)
+            
+            print(f"⏳ Horário atual: {agora_utc.strftime('%H:%M:%S')} UTC")
+            print(f"   Aguardando {proximo_horario_str} (faltam ~{minutos_faltando} min)")
+            
+            time.sleep(segundos_para_o_proximo_check)
+
+# --- FUNÇÃO DE WEBHOOK ---
 def enviar_webhook(mensagem_txt):
-    """
-    Envia a mensagem para o Seatalk com formatação de código.
-    Troca aspas duplas por simples para evitar erro de JSON.
-    """
     webhook_url = os.environ.get('SEATALK_WEBHOOK_URL') 
     if not webhook_url:
-        print("❌ Erro: Variável 'SEATALK_WEBHOOK_URL' não definida.")
+        print("❌ Erro: 'SEATALK_WEBHOOK_URL' não definida.")
         return
 
     # Limpeza de Segurança
     mensagem_limpa = str(mensagem_txt).replace('"', "'").replace('\\', '/')
     
-    # Montagem com Visual (Bloco de Código)
+    # Formatação visual (Bloco de Código)
     conteudo_formatado = f"```\n{mensagem_limpa}\n```"
 
     payload = {
@@ -48,54 +74,46 @@ def enviar_webhook(mensagem_txt):
     try:
         print("📤 Enviando mensagem para o Seatalk...")
         response = requests.post(webhook_url, json=payload, timeout=15)
-        
         if response.status_code != 200 or ("code" in response.text and response.json().get('code') != 0):
             print(f"❌ Erro no envio: {response.text}")
         else:
             print("✅ Mensagem enviada com sucesso.")
-
     except Exception as e:
         print(f"❌ Falha crítica ao enviar webhook: {e}")
 
-# --- Função de Autenticação (CORRIGIDA) ---
+# --- Autenticação ---
 def autenticar_e_criar_cliente():
     creds_raw = os.environ.get('GCP_SA_KEY_JSON', '').strip()
     if not creds_raw:
-        print("❌ Erro: Variável 'GCP_SA_KEY_JSON' vazia.")
+        print("❌ Erro: 'GCP_SA_KEY_JSON' vazia.")
         return None
 
-    # Decodificação Base64
     try:
         decoded_bytes = base64.b64decode(creds_raw, validate=True)
         creds_json_str = decoded_bytes.decode('utf-8')
-        # print("ℹ️ Credencial Base64 decodificada.")
     except (binascii.Error, ValueError):
         creds_json_str = creds_raw
 
     try:
         creds_dict = json.loads(creds_json_str)
-        
-        # --- CORREÇÃO DO ERRO 'NO ACCESS TOKEN' ---
-        # Criamos a credencial manualmente com a lib oficial do Google
         creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
         cliente = gspread.authorize(creds)
-        print("✅ Cliente autenticado com sucesso (google.oauth2).")
+        print("✅ Cliente autenticado (google.oauth2).")
         return cliente
     except Exception as e:
         print(f"❌ Erro na autenticação: {e}")
         return None
 
-# --- Funções Auxiliares ---
+# --- Auxiliares ---
 def minutos_para_hhmm(minutos):
+    # Formata para "10:36h" como solicitado
     horas = minutos // 60
     mins = minutos % 60
     return f"{horas:02d}:{mins:02d}h"
 
 def turno_atual():
-    # UTC - 3h para simular Horário de Brasília
     agora_br = datetime.utcnow() - timedelta(hours=3)
     hora_atual = agora_br.time()
-    
     if hora_atual >= dt_time(6, 0) and hora_atual < dt_time(14, 0): return "T1"
     elif hora_atual >= dt_time(14, 0) and hora_atual < dt_time(22, 0): return "T2"
     else: return "T3"
@@ -105,7 +123,6 @@ def ordenar_turnos(pendentes_por_turno):
     t_atual = turno_atual()
     idx = ordem_turnos.index(t_atual)
     nova_ordem = ordem_turnos[idx:] + ordem_turnos[:idx]
-    
     turnos_existentes = {k: v for k, v in pendentes_por_turno.items() if k in nova_ordem}
     return sorted(turnos_existentes.items(), key=lambda x: nova_ordem.index(x[0]))
 
@@ -146,37 +163,36 @@ def main():
     df = pd.DataFrame(valores[1:], columns=valores[0])
     df.columns = [col.strip() for col in df.columns]
 
-    # Mapeamento Dinâmico de Colunas
     try:
         header_eta = valores[0][1].strip() # Coluna B
         header_origem = valores[0][28].strip() # Coluna AC
         header_chegada = valores[0][3].strip() # Coluna D
         header_pacotes = valores[0][5].strip() # Coluna F
     except IndexError:
-        print("❌ Erro: Estrutura da planilha mudou (colunas insuficientes).")
+        print("❌ Erro: Estrutura da planilha mudou.")
         return
 
-    # Normalização
     if header_eta != 'ETA Planejado':
         df.rename(columns={header_eta: 'ETA Planejado'}, inplace=True)
 
-    # Conversão de Tipos
-    df['Add to Queue Time'] = pd.to_datetime(df['Add to Queue Time'], errors='coerce')
-    df['ETA Planejado'] = pd.to_datetime(df['ETA Planejado'], format='%d/%m/%Y %H:%M', errors='coerce')
-    df[header_chegada] = pd.to_datetime(df[header_chegada], format='%d/%m/%Y %H:%M', errors='coerce')
+    # --- MUDANÇA PRINCIPAL: FLEXIBILIDADE DE DATA ---
+    # dayfirst=True garante que 06/01 seja lido como 6 de Jan, não 1 de Jun
+    # errors='coerce' transforma datas inválidas em NaT sem travar o script
+    df['Add to Queue Time'] = pd.to_datetime(df['Add to Queue Time'], dayfirst=True, errors='coerce')
+    df['ETA Planejado'] = pd.to_datetime(df['ETA Planejado'], dayfirst=True, errors='coerce')
+    df[header_chegada] = pd.to_datetime(df[header_chegada], dayfirst=True, errors='coerce')
+    # -----------------------------------------------
+
     df[header_pacotes] = pd.to_numeric(df[header_pacotes], errors='coerce').fillna(0).astype(int)
     
-    # Sanitização de Strings
     cols_string = ['Satus 2.0', 'Doca', 'Turno 2', header_origem, 'LH Trip Nnumber']
     for col in cols_string:
         if col in df.columns:
             df[col] = df[col].astype(str).str.strip().fillna('')
 
-    # Filtros
     df['Satus 2.0'] = df['Satus 2.0'].replace({'Pendente Recepção': 'pendente recepção', 'Pendente De Chegada': 'pendente de chegada'})
     df = df[~df['Satus 2.0'].str.lower().str.contains('finalizado', na=False)]
 
-    # Definição de Tempo (UTC para cálculo de data, -3h visual é feito na função turno)
     agora_utc = datetime.utcnow().replace(second=0, microsecond=0)
     inicio_dia, fim_dia = periodo_dia_customizado(agora_utc)
 
@@ -191,32 +207,33 @@ def main():
         eta_pendente = row['ETA Planejado']
         turno = row['Turno 2']
 
-        # Lógica Pendentes
         if status in pendentes_status and pd.notna(eta_pendente) and inicio_dia <= eta_pendente <= fim_dia:
             if turno not in pendentes_por_turno:
                 pendentes_por_turno[turno] = {'lts': 0, 'pacotes': 0}
             pendentes_por_turno[turno]['lts'] += 1
             pendentes_por_turno[turno]['pacotes'] += pacotes 
             
-        # Lógica Doca/Fila
         entrada_cd = row['Add to Queue Time']
         doca = row['Doca'] if row['Doca'] else '--'
         
+        # --- FORMATAÇÃO DA SAÍDA (O SEU PEDIDO) ---
+        # Aqui convertemos qualquer formato de entrada para o padrão 'dd/mm HH:MM'
         eta_str = row['ETA Planejado'].strftime('%d/%m %H:%M') if pd.notna(row['ETA Planejado']) else '--/-- --:--'
         chegada_str = row[header_chegada].strftime('%d/%m %H:%M') if pd.notna(row[header_chegada]) else '--/-- --:--'
+        # ------------------------------------------
         
         minutos = None
         if pd.notna(entrada_cd):
             minutos = int((agora_utc - entrada_cd).total_seconds() / 60)
 
         if status == 'em doca' and minutos is not None:
+            # minutos_para_hhmm já retorna no formato "HH:MMh"
             msg_doca = f"- {trip} | Doca: {padronizar_doca(doca)} | ETA: {eta_str} | Cheg: {chegada_str} | Tempo: {minutos_para_hhmm(minutos)} | {origem}"
             em_doca.append((minutos, msg_doca))
         elif 'fila' in status and minutos is not None:
             msg_fila = f"- {trip} | ETA: {eta_str} | Cheg: {chegada_str} | Tempo: {minutos_para_hhmm(minutos)} | {origem}"
             em_fila.append((minutos, msg_fila))
 
-    # Ordenação e Montagem
     em_doca.sort(key=lambda x: x[0], reverse=True)
     em_fila.sort(key=lambda x: x[0], reverse=True)
     mensagem = []
@@ -237,13 +254,14 @@ def main():
         mensagem.append("✅ Nenhuma pendência no momento.")
 
     if not mensagem:
-        print("ℹ️ Nenhuma mensagem relevante para enviar.")
+        print("ℹ️ Nenhuma mensagem relevante.")
         return
 
     mensagem_final = "Segue as LH´s com mais tempo de Pátio:\n\n" + "\n\n".join(mensagem)
     enviar_webhook(mensagem_final)
 
 if __name__ == '__main__':
+    aguardar_horario_correto()
     try:
         main()
     except Exception as e:
