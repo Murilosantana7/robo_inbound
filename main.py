@@ -19,38 +19,7 @@ SCOPES = [
 SPREADSHEET_ID = '1TfzqJZFD3yPNCAXAiLyEw876qjOlitae0pP9TTqNCPI'
 NOME_ABA = 'Tabela dinâmica 2'
 
-# --- FUNÇÃO DE ESPERA ("O PORTÃO") ---
-def aguardar_horario_correto():
-    """
-    Verifica se é hora cheia (XX:00) ou meia hora (XX:30) no fuso UTC.
-    """
-    print(f"Iniciando verificação de horário às {datetime.utcnow().strftime('%H:%M:%S')} (Fuso UTC)")
-    
-    while True:
-        agora_utc = datetime.utcnow()
-        minutos_atuais = agora_utc.minute
-        
-        if minutos_atuais == 0 or minutos_atuais == 30:
-            print(f"✅ 'Portão' aberto: {agora_utc.strftime('%H:%M:%S')} UTC")
-            print("Iniciando coleta de dados...")
-            break
-        else:
-            if minutos_atuais < 30:
-                minutos_faltando = 30 - minutos_atuais
-                proximo_horario_str = f"{agora_utc.hour:02d}:30"
-            else:
-                minutos_faltando = 60 - minutos_atuais
-                proxima_hora = (agora_utc.hour + 1) % 24
-                proximo_horario_str = f"{proxima_hora:02d}:00"
-            
-            segundos_para_o_proximo_check = 30 - (agora_utc.second % 30)
-            
-            print(f"⏳ Horário atual: {agora_utc.strftime('%H:%M:%S')} UTC")
-            print(f"   Aguardando {proximo_horario_str} (faltam ~{minutos_faltando} min)")
-            
-            time.sleep(segundos_para_o_proximo_check)
-
-# --- FUNÇÃO DE WEBHOOK ---
+# --- FUNÇÃO DE WEBHOOK (BLINDADA) ---
 def enviar_webhook(mensagem_txt):
     webhook_url = os.environ.get('SEATALK_WEBHOOK_URL') 
     if not webhook_url:
@@ -81,7 +50,7 @@ def enviar_webhook(mensagem_txt):
     except Exception as e:
         print(f"❌ Falha crítica ao enviar webhook: {e}")
 
-# --- Autenticação ---
+# --- Autenticação (google-auth) ---
 def autenticar_e_criar_cliente():
     creds_raw = os.environ.get('GCP_SA_KEY_JSON', '').strip()
     if not creds_raw:
@@ -104,9 +73,8 @@ def autenticar_e_criar_cliente():
         print(f"❌ Erro na autenticação: {e}")
         return None
 
-# --- Auxiliares ---
+# --- Funções Auxiliares ---
 def minutos_para_hhmm(minutos):
-    # Formata para "10:36h" como solicitado
     horas = minutos // 60
     mins = minutos % 60
     return f"{horas:02d}:{mins:02d}h"
@@ -141,7 +109,7 @@ def padronizar_doca(doca_str):
 
 # --- MAIN ---
 def main():
-    print(f"🔄 Script de Monitoramento Iniciado.")
+    print(f"🔄 Script de Monitoramento Iniciado (Sem espera).")
     cliente = autenticar_e_criar_cliente()
     if not cliente: return
 
@@ -164,10 +132,10 @@ def main():
     df.columns = [col.strip() for col in df.columns]
 
     try:
-        header_eta = valores[0][1].strip() # Coluna B
-        header_origem = valores[0][28].strip() # Coluna AC
-        header_chegada = valores[0][3].strip() # Coluna D
-        header_pacotes = valores[0][5].strip() # Coluna F
+        header_eta = valores[0][1].strip() # B
+        header_origem = valores[0][28].strip() # AC
+        header_chegada = valores[0][3].strip() # D
+        header_pacotes = valores[0][5].strip() # F
     except IndexError:
         print("❌ Erro: Estrutura da planilha mudou.")
         return
@@ -175,14 +143,10 @@ def main():
     if header_eta != 'ETA Planejado':
         df.rename(columns={header_eta: 'ETA Planejado'}, inplace=True)
 
-    # --- MUDANÇA PRINCIPAL: FLEXIBILIDADE DE DATA ---
-    # dayfirst=True garante que 06/01 seja lido como 6 de Jan, não 1 de Jun
-    # errors='coerce' transforma datas inválidas em NaT sem travar o script
+    # Conversão Flexível de Datas
     df['Add to Queue Time'] = pd.to_datetime(df['Add to Queue Time'], dayfirst=True, errors='coerce')
     df['ETA Planejado'] = pd.to_datetime(df['ETA Planejado'], dayfirst=True, errors='coerce')
     df[header_chegada] = pd.to_datetime(df[header_chegada], dayfirst=True, errors='coerce')
-    # -----------------------------------------------
-
     df[header_pacotes] = pd.to_numeric(df[header_pacotes], errors='coerce').fillna(0).astype(int)
     
     cols_string = ['Satus 2.0', 'Doca', 'Turno 2', header_origem, 'LH Trip Nnumber']
@@ -216,18 +180,15 @@ def main():
         entrada_cd = row['Add to Queue Time']
         doca = row['Doca'] if row['Doca'] else '--'
         
-        # --- FORMATAÇÃO DA SAÍDA (O SEU PEDIDO) ---
-        # Aqui convertemos qualquer formato de entrada para o padrão 'dd/mm HH:MM'
+        # Formatação de saída forçada para dd/mm HH:MM
         eta_str = row['ETA Planejado'].strftime('%d/%m %H:%M') if pd.notna(row['ETA Planejado']) else '--/-- --:--'
         chegada_str = row[header_chegada].strftime('%d/%m %H:%M') if pd.notna(row[header_chegada]) else '--/-- --:--'
-        # ------------------------------------------
         
         minutos = None
         if pd.notna(entrada_cd):
             minutos = int((agora_utc - entrada_cd).total_seconds() / 60)
 
         if status == 'em doca' and minutos is not None:
-            # minutos_para_hhmm já retorna no formato "HH:MMh"
             msg_doca = f"- {trip} | Doca: {padronizar_doca(doca)} | ETA: {eta_str} | Cheg: {chegada_str} | Tempo: {minutos_para_hhmm(minutos)} | {origem}"
             em_doca.append((minutos, msg_doca))
         elif 'fila' in status and minutos is not None:
@@ -261,7 +222,7 @@ def main():
     enviar_webhook(mensagem_final)
 
 if __name__ == '__main__':
-    aguardar_horario_correto()
+    # Executa imediatamente
     try:
         main()
     except Exception as e:
