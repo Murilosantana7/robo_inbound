@@ -24,7 +24,7 @@ def aguardar_horario_correto():
     print(f"Iniciando verificação de horário às {datetime.utcnow().strftime('%H:%M:%S')} (Fuso UTC do Servidor)")
     
     while True:
-        # O GitHub Actions roda em UTC. Os minutos coincidem com o Brasil (ex: 12:30 UTC é 09:30 BRT)
+        # O GitHub Actions roda em UTC. Os minutos coincidem com o Brasil
         agora_utc = datetime.utcnow()
         minutos_atuais = agora_utc.minute
         
@@ -145,7 +145,7 @@ def padronizar_doca(doca_str):
 def main():
     print(f"🔄 Script 'main' iniciado.")
     
-    # 1. Definição do Horário BRASÍLIA (UTC-3) para cálculos corretos
+    # 1. Definição do Horário BRASÍLIA (UTC-3)
     agora_br = datetime.utcnow() - timedelta(hours=3)
     agora_br = agora_br.replace(second=0, microsecond=0)
     print(f"🕒 Horário de Referência (Brasília): {agora_br}")
@@ -173,16 +173,16 @@ def main():
     # --- CONFIGURAÇÃO DE COLUNAS ---
     COL_TRIP    = 'LH Trip Nnumber'
     COL_ETA     = 'ETA Planejado'
-    COL_ORIGEM  = 'station_code'             # Usa código da estação
-    COL_CHECKIN = 'Checkin'                  # Prioridade 1 para Tempo
-    COL_ENTRADA = 'Add to Queue Time'        # Prioridade 2 para Tempo
+    COL_ORIGEM  = 'station_code'
+    COL_CHECKIN = 'Checkin'
+    COL_ENTRADA = 'Add to Queue Time'
     COL_PACOTES = 'SUM de Pending Inbound Parcel Qty'
     COL_STATUS  = 'Status'
     COL_TURNO   = 'Turno'
     COL_DOCA    = 'Doca'
     # --------------------------------
 
-    # 1. Tratamento de Cabeçalhos Duplicados (Evita o erro "Truth value of a Series is ambiguous")
+    # 1. Tratamento de Cabeçalhos
     headers_originais = [str(h).strip() for h in valores[0]]
     headers_unicos = []
     seen = {}
@@ -200,27 +200,19 @@ def main():
     # --- CONVERSÃO DE DATAS ---
     print("ℹ️ Convertendo colunas de data...")
     
-    # Checkin
     if COL_CHECKIN in df.columns:
         df[COL_CHECKIN] = pd.to_datetime(df[COL_CHECKIN], dayfirst=True, errors='coerce')
     else:
-        # Fallback pelo índice D (3)
-        if len(df.columns) > 3:
-             df[COL_CHECKIN] = pd.to_datetime(df.iloc[:, 3], dayfirst=True, errors='coerce')
+        if len(df.columns) > 3: df[COL_CHECKIN] = pd.to_datetime(df.iloc[:, 3], dayfirst=True, errors='coerce')
 
-    # Add to Queue Time
     if COL_ENTRADA in df.columns:
         df[COL_ENTRADA] = pd.to_datetime(df[COL_ENTRADA], dayfirst=True, errors='coerce')
     else:
-         # Fallback pelo índice G (6)
-         if len(df.columns) > 6:
-             df[COL_ENTRADA] = pd.to_datetime(df.iloc[:, 6], dayfirst=True, errors='coerce')
+         if len(df.columns) > 6: df[COL_ENTRADA] = pd.to_datetime(df.iloc[:, 6], dayfirst=True, errors='coerce')
 
-    # ETA
     if COL_ETA in df.columns:
         df[COL_ETA] = pd.to_datetime(df[COL_ETA], dayfirst=True, errors='coerce')
     
-    # Pacotes
     if COL_PACOTES in df.columns:
         df[COL_PACOTES] = pd.to_numeric(df[COL_PACOTES], errors='coerce').fillna(0).astype(int)
 
@@ -228,7 +220,6 @@ def main():
     if COL_STATUS in df.columns:
         df[COL_STATUS] = df[COL_STATUS].astype(str).str.strip()
         df[COL_STATUS] = df[COL_STATUS].replace({'Pendente Recepção': 'pendente recepção', 'Pendente De Chegada': 'pendente de chegada'})
-        # Filtro finalizado
         df = df[~df[COL_STATUS].fillna('').str.lower().str.contains('finalizado')]
 
     inicio_dia, fim_dia = periodo_dia_customizado(agora_br)
@@ -254,7 +245,6 @@ def main():
         val_checkin = row.get(COL_CHECKIN)
         val_entrada = row.get(COL_ENTRADA)
         
-        # Prioriza Checkin. Se vazio, usa Entrada.
         data_referencia = val_checkin if pd.notna(val_checkin) else val_entrada
         
         eta_str = eta.strftime('%d/%m %H:%M') if pd.notna(eta) else '--/-- --:--'
@@ -265,35 +255,38 @@ def main():
 
         minutos = -999999
         if pd.notna(data_referencia):
-            # Cálculo de Tempo: Agora (BR) - Chegada (BR)
             minutos = int((agora_br - data_referencia).total_seconds() / 60)
 
         if pd.notna(data_referencia) or status == 'em doca' or 'fila' in status:
             tempo_fmt = minutos_para_hhmm(minutos) if minutos != -999999 else "--:--"
             
-            linha_msg = f"- {trip} | Doca: {doca_limpa} | ETA: {eta_str} | Chegada: {chegada_str} | Tempo: {tempo_fmt} | {origem}"
+            # --- FORMATAÇÃO TABULAR ---
+            # AQUI FOI ALTERADO: {trip:^14} para centralizar
+            linha_tabela = f"- {trip:^14} | {doca_limpa:^8} | {eta_str:^13} | {chegada_str:^13} | {tempo_fmt:^11} | {origem}"
             
-            # Tupla: (MinutosNuméricos, TextoFormatado)
             if 'fila' in status:
-                em_fila.append((minutos, linha_msg))
+                em_fila.append((minutos, linha_tabela))
             elif status == 'em doca':
-                em_doca.append((minutos, linha_msg))
+                em_doca.append((minutos, linha_tabela))
 
-    # --- ORDENAÇÃO (Maior tempo primeiro) ---
+    # --- ORDENAÇÃO ---
     em_doca.sort(key=lambda x: x[0], reverse=True)
     em_fila.sort(key=lambda x: x[0], reverse=True)
 
     mensagem = []
+    
+    # Cabeçalho da Tabela (AQUI FOI ALTERADO: {'LT':^14} para centralizar)
+    header_tabela = f"  {'LT':^14} | {'Doca':^8} | {'ETA':^13} | {'Chegada':^13} | {'Tempo CD':^11} | Origem"
 
     if em_doca:
         qtd = len(em_doca)
         texto = "\n".join([x[1] for x in em_doca])
-        mensagem.append(f"🚛 Em Doca: {qtd} LT(s)\n{texto}")
+        mensagem.append(f"🚛 Em Doca: {qtd} LT(s)\n{header_tabela}\n{texto}")
 
     if em_fila:
         qtd = len(em_fila)
         texto = "\n".join([x[1] for x in em_fila])
-        mensagem.append(f"🔴 Em Fila: {qtd} LT(s)\n{texto}")
+        mensagem.append(f"🔴 Em Fila: {qtd} LT(s)\n{header_tabela}\n{texto}")
 
     total_pend = sum(d['lts'] for d in pendentes_por_turno.values())
     if total_pend > 0:
@@ -314,10 +307,8 @@ def main():
 
 if __name__ == '__main__':
     # --- TRAVA DE PORTÃO ATIVADA ---
-    # 1. Aguarda XX:00 ou XX:30
     aguardar_horario_correto()
     
-    # 2. Executa a lógica principal
     try:
         main()
     except Exception as e:
