@@ -14,7 +14,6 @@ import binascii
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 SPREADSHEET_ID = '1TfzqJZFD3yPNCAXAiLyEw876qjOlitae0pP9TTqNCPI'
 NOME_ABA = 'Tabela dinâmica 2'
-MAX_ITENS_VISUALIZAR = 10  # Máximo de linhas por categoria na mensagem
 
 # --- Função de Autenticação ---
 def autenticar_e_criar_cliente():
@@ -36,15 +35,16 @@ def autenticar_e_criar_cliente():
         print(f"❌ Erro ao autenticar: {e}")
         return None
 
-# --- Função de Webhook ---
+# --- Função de Webhook (Com Logs Detalhados) ---
 def enviar_webhook(mensagem_txt):
     webhook_url = os.environ.get('SEATALK_WEBHOOK_URL') 
     if not webhook_url:
         print("❌ Erro: Variável 'SEATALK_WEBHOOK_URL' não definida.")
         return
     
+    # Mostra um pedaço da mensagem no log para conferência
     print("--- CONTEÚDO DA MENSAGEM (PREVIEW) ---")
-    print(mensagem_txt[:500] + "\n... [texto truncado no log] ...") 
+    print(mensagem_txt[:500] + ("\n... [restante da mensagem] ..." if len(mensagem_txt) > 500 else "")) 
     print("--------------------------------------")
 
     try:
@@ -58,7 +58,7 @@ def enviar_webhook(mensagem_txt):
         try:
             resp_json = response.json()
             if resp_json.get('code') not in [0, 200]:
-                print(f"⚠️ ERRO LÓGICO SEATALK: {resp_json}")
+                print(f"⚠️ AVISO SEATALK: {resp_json}")
             else:
                 print("✅ Mensagem enviada com sucesso!")
         except:
@@ -128,7 +128,7 @@ def main():
     df = pd.DataFrame(valores[1:], columns=valores[0])
     df.columns = [col.strip() for col in df.columns]
 
-    # Identificação dos cabeçalhos
+    # Identificação dos cabeçalhos principais
     try:
         header_eta = valores[0][1].strip()     # Coluna B
         header_origem = valores[0][28].strip() # Coluna AC
@@ -144,22 +144,23 @@ def main():
     }
     df.rename(columns=mapeamento, inplace=True)
     
-    # Tratamento de Strings Básicas
+    # Tratamento de Strings
     df['LH Trip Nnumber'] = df['LH Trip Nnumber'].astype(str).str.strip()
     df['Satus 2.0'] = df['Satus 2.0'].astype(str).str.strip()
     df['Doca'] = df['Doca'].astype(str).str.strip()
     df['Turno 2'] = df['Turno 2'].astype(str).str.strip()
     
-    # --- LÓGICA DE DATAS (Prioridade D, depois G) ---
+    # --- LÓGICA DE DATAS DE CHEGADA (Prioridade D, depois G) ---
     print("ℹ️ Processando datas de Chegada (Colunas D e G)...")
     
     # Coluna D = Índice 3 | Coluna G = Índice 6
+    # dayfirst=True garante leitura correta de dd/mm/yyyy
     col_d_convertida = pd.to_datetime(df.iloc[:, 3], dayfirst=True, errors='coerce')
     col_g_convertida = pd.to_datetime(df.iloc[:, 6], dayfirst=True, errors='coerce')
     
-    # Combina: Se D for valido usa D, senão usa G
+    # Combina: Se D for válido usa D, senão usa G
     df['Chegada LT'] = col_d_convertida.combine_first(col_g_convertida)
-    # ------------------------------------------------
+    # -----------------------------------------------------------
 
     # Outras conversões de Data
     df['Add to Queue Time'] = pd.to_datetime(df['Add to Queue Time'], dayfirst=True, errors='coerce')
@@ -217,21 +218,17 @@ def main():
 
     mensagem = []
 
+    # --- LISTAGEM COMPLETA (SEM LIMITES) ---
     if em_doca:
         qtd = len(em_doca)
-        itens = em_doca[:MAX_ITENS_VISUALIZAR]
-        texto = "\n".join([x[1] for x in itens])
-        if qtd > MAX_ITENS_VISUALIZAR:
-            texto += f"\n... e mais {qtd - MAX_ITENS_VISUALIZAR} LTs ocultas."
+        texto = "\n".join([x[1] for x in em_doca])
         mensagem.append(f"🚛 Em Doca: {qtd} LT(s)\n{texto}")
 
     if em_fila:
         qtd = len(em_fila)
-        itens = em_fila[:MAX_ITENS_VISUALIZAR]
-        texto = "\n".join([x[1] for x in itens])
-        if qtd > MAX_ITENS_VISUALIZAR:
-            texto += f"\n... e mais {qtd - MAX_ITENS_VISUALIZAR} LTs ocultas."
+        texto = "\n".join([x[1] for x in em_fila])
         mensagem.append(f"🔴 Em Fila: {qtd} LT(s)\n{texto}")
+    # ---------------------------------------
 
     total_pend = sum(d['lts'] for d in pendentes_por_turno.values())
     if total_pend > 0:
