@@ -19,36 +19,7 @@ SCOPES = [
 SPREADSHEET_ID = '1TfzqJZFD3yPNCAXAiLyEw876qjOlitae0pP9TTqNCPI'
 NOME_ABA = 'Tabela dinâmica 2'
 
-# --- LEITURA AVANÇADA DE DATAS (COM LIMPEZA DE TEXTO) ---
-def ler_data_universal(valor):
-    """
-    Procura datas dentro de células sujas (Ex: '2026-01-06 13:08 LH - Inbound')
-    e converte para datetime válido.
-    """
-    valor_str = str(valor).strip()
-    
-    if not valor_str or valor_str.lower() in ['nat', 'nan', 'none', '', '--', '-', 'null']:
-        return pd.NaT
-
-    try:
-        # 1. TENTA ENCONTRAR PADRÃO ISO (2026-01-06 13:08) NO MEIO DO TEXTO
-        # A regex procura: 4 digitos - 2 digitos - 2 digitos espaço 2 dig : 2 dig
-        match_iso = re.search(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2})', valor_str)
-        if match_iso:
-            return pd.to_datetime(match_iso.group(1), format='mixed', dayfirst=False)
-        
-        # 2. TENTA ENCONTRAR PADRÃO BR (06/01/2026 13:08) NO MEIO DO TEXTO
-        match_br = re.search(r'(\d{1,2}/\d{1,2}/\d{2,4} \d{2}:\d{2})', valor_str)
-        if match_br:
-            return pd.to_datetime(match_br.group(1), dayfirst=True)
-            
-        # 3. Tenta conversão direta se não achou padrão específico (fallback)
-        return pd.to_datetime(valor_str, dayfirst=True, errors='coerce')
-    
-    except:
-        return pd.NaT
-
-# --- AUXILIARES ---
+# --- AUXILIARES DE FORMATAÇÃO ---
 def formatar_saida_data(data_obj):
     """Garante saída visual: 06/01 13:00"""
     if pd.isna(data_obj):
@@ -57,8 +28,8 @@ def formatar_saida_data(data_obj):
 
 def minutos_para_hhmm(minutos):
     """Garante saída visual: 10:36h"""
-    # Proteção contra erros de fuso gigantes
     if minutos is None: return "--:--h"
+    # Filtro para erros de fuso muito grandes (ex: datas de 1900)
     if minutos < -1000: minutos = 0 
     
     sinal = "-" if minutos < 0 else ""
@@ -145,13 +116,12 @@ def periodo_dia_filtro(agora_br):
 
 # --- MAIN ---
 def main():
-    print(f"🔄 Script Final (Com Limpeza de Texto) Iniciado.")
+    print(f"🔄 Script Iniciado (Formatos Rígidos).")
     client = autenticar()
     if not client: return
 
     try:
         sheet = client.open_by_key(SPREADSHEET_ID).worksheet(NOME_ABA)
-        # Pega dados brutos
         raw_data = sheet.get('A1:AC8000')
         print("✅ Dados baixados.")
     except Exception as e:
@@ -164,37 +134,73 @@ def main():
     df = pd.DataFrame(raw_data[1:], columns=raw_data[0])
     df.columns = [c.strip() for c in df.columns]
 
-    # Mapeamento
+    # --- MAPEAMENTO E CONVERSÃO RÍGIDA DE COLUNAS ---
+    # Coluna B (Index 1) -> dd/mm/yyyy hh:mm
+    # Coluna D (Index 3) -> dd/mm/yyyy hh:mm
+    # Coluna G (Index 6) -> dd/mm/yyyy hh:mm
+    # Coluna I (Index 8) -> hh:mm
+    # Coluna O (Index 14)-> dd/mm/yyyy
+    
+    # Dicionário: {Index: Formato}
+    mapa_formatos = {
+        1: '%d/%m/%Y %H:%M',  # B: ETA
+        3: '%d/%m/%Y %H:%M',  # D: Chegada
+        6: '%d/%m/%Y %H:%M',  # G: Add to Queue (Entrada)
+        8: '%H:%M',           # I: Apenas hora
+        14: '%d/%m/%Y'        # O: Apenas data
+    }
+
+    print("🛠️ Aplicando formatos definidos pelo usuário...")
+    
+    col_nomes = {} # Guarda o nome da coluna para usar na lógica depois
+
+    for idx, formato in mapa_formatos.items():
+        try:
+            nome_col = df.columns[idx]
+            col_nomes[idx] = nome_col # Salva referência
+            
+            # Força conversão para string e limpa espaços
+            df[nome_col] = df[nome_col].astype(str).str.strip()
+            
+            # Converte usando o formato estrito
+            df[nome_col] = pd.to_datetime(df[nome_col], format=formato, errors='coerce')
+        except IndexError:
+            print(f"⚠️ Aviso: Coluna índice {idx} não existe na planilha.")
+        except Exception as e:
+            print(f"⚠️ Erro ao processar coluna {idx}: {e}")
+
+    # --- DEFINIÇÃO DE VARIÁVEIS CHAVE ---
+    # Usa os índices mapeados acima para garantir que estamos pegando a coluna certa
+    # Se der erro de índice, tenta pegar pelo nome antigo como fallback
     try:
-        col_eta = raw_data[0][1].strip()      # B
-        col_chegada = raw_data[0][3].strip()  # D
-        col_pacotes = raw_data[0][5].strip()  # F
-        col_origem = raw_data[0][28].strip()  # AC
+        col_eta = df.columns[1]      # B
+        col_chegada = df.columns[3]  # D
+        col_entrada = df.columns[6]  # G (Add to Queue Time)
+        col_pacotes = df.columns[5]  # F (Mantido fixo)
+        col_origem = df.columns[28]  # AC (Mantido fixo - se mudou avise)
+        col_trip = 'LH Trip Nnumber' # Busca pelo nome pois pode variar posição
+        col_status = 'Satus 2.0'     # Busca pelo nome
+        col_turno = 'Turno 2'        # Busca pelo nome
+        col_doca = 'Doca'            # Busca pelo nome
     except:
-        print("❌ Erro estrutura colunas.")
+        print("❌ Erro crítico na estrutura da planilha.")
         return
 
-    if col_eta != 'ETA Planejado': df.rename(columns={col_eta: 'ETA Planejado'}, inplace=True)
-
-    # --- APLICAÇÃO DA LIMPEZA ---
-    print("🛠️ Limpando textos das datas...")
-    df['Add to Queue Time'] = df['Add to Queue Time'].apply(ler_data_universal)
-    df['ETA Planejado'] = df['ETA Planejado'].apply(ler_data_universal)
-    # Garante que a coluna usada para exibição "Cheg" também seja limpa
-    df[col_chegada] = df[col_chegada].apply(ler_data_universal)
-    # ----------------------------
-
+    # Limpeza de numéricos
     df[col_pacotes] = pd.to_numeric(df[col_pacotes], errors='coerce').fillna(0).astype(int)
     
-    cols_str = ['Satus 2.0', 'Doca', 'Turno 2', col_origem, 'LH Trip Nnumber']
+    # Limpeza de Strings
+    cols_str = [col_status, col_doca, col_turno, col_origem, col_trip]
     for c in cols_str:
         if c in df.columns: df[c] = df[c].astype(str).str.strip().fillna('')
 
-    df['Satus 2.0'] = df['Satus 2.0'].replace({
-        'Pendente Recepção': 'pendente recepção', 
-        'Pendente De Chegada': 'pendente de chegada'
-    })
-    df = df[~df['Satus 2.0'].str.lower().str.contains('finalizado', na=False)]
+    # Filtros
+    if col_status in df.columns:
+        df[col_status] = df[col_status].replace({
+            'Pendente Recepção': 'pendente recepção', 
+            'Pendente De Chegada': 'pendente de chegada'
+        })
+        df = df[~df[col_status].str.lower().str.contains('finalizado', na=False)]
 
     agora = get_agora_br()
     inicio_dia, fim_dia = periodo_dia_filtro(agora)
@@ -203,32 +209,35 @@ def main():
     status_pend = ['pendente de chegada', 'pendente recepção']
 
     for _, row in df.iterrows():
-        trip = row['LH Trip Nnumber']
-        status = row['Satus 2.0'].lower()
-        origem = row[col_origem] if row[col_origem] else '--'
-        eta_val = row['ETA Planejado']
+        # Verificações de segurança para colunas que podem não existir
+        trip = row[col_trip] if col_trip in df.columns else 'N/A'
+        status = row[col_status].lower() if col_status in df.columns else ''
+        origem = row[col_origem] if col_origem in df.columns and row[col_origem] else '--'
+        eta_val = row[col_eta]
         chegada_val = row[col_chegada]
         
         # Pendentes
         if status in status_pend and pd.notna(eta_val) and inicio_dia <= eta_val <= fim_dia:
-            t = row['Turno 2']
+            t = row[col_turno] if col_turno in df.columns else 'T?'
             if t not in pendentes: pendentes[t] = {'lts':0, 'pct':0}
             pendentes[t]['lts'] += 1
             pendentes[t]['pct'] += row[col_pacotes]
 
         # Tempo de Pátio
-        entrada = row['Add to Queue Time']
+        entrada = row[col_entrada]
         minutos = None
         if pd.notna(entrada):
-            # CÁLCULO DO TEMPO: AGORA (BR) - ENTRADA (Lida da planilha)
+            # CÁLCULO: AGORA (BR) - ENTRADA (Coluna G formatada)
             minutos = int((agora - entrada).total_seconds() / 60)
 
         # Formatação Visual
         eta_fmt = formatar_saida_data(eta_val)
-        cheg_fmt = formatar_saida_data(chegada_val) # Agora vai funcionar!
+        cheg_fmt = formatar_saida_data(chegada_val)
         tempo_fmt = minutos_para_hhmm(minutos)
+        
+        doca_val = padronizar_doca(row[col_doca]) if col_doca in df.columns else '--'
 
-        linha = f"- {trip} | Doca: {padronizar_doca(row['Doca'])} | ETA: {eta_fmt} | Cheg: {cheg_fmt} | Tempo: {tempo_fmt} | {origem}"
+        linha = f"- {trip} | Doca: {doca_val} | ETA: {eta_fmt} | Cheg: {cheg_fmt} | Tempo: {tempo_fmt} | {origem}"
         linha_fila = f"- {trip} | ETA: {eta_fmt} | Cheg: {cheg_fmt} | Tempo: {tempo_fmt} | {origem}"
 
         if status == 'em doca' and minutos is not None:
