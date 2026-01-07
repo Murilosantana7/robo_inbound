@@ -70,30 +70,32 @@ def enviar_webhook(mensagem_txt):
 
 # --- Funções Auxiliares ---
 def minutos_para_hhmm(minutos):
+    # Formata para HH:MMh
     sinal = "-" if minutos < 0 else ""
     m = abs(minutos)
     horas = m // 60
     mins = m % 60
     return f"{sinal}{horas:02d}:{mins:02d}h"
 
-def turno_atual():
-    agora = datetime.utcnow().time()
-    if agora >= dt_time(6, 0) and agora < dt_time(14, 0): return "T1"
-    elif agora >= dt_time(14, 0) and agora < dt_time(22, 0): return "T2"
+def turno_atual(agora_br):
+    # Recebe o horário BR e define o turno
+    hora_time = agora_br.time()
+    if hora_time >= dt_time(6, 0) and hora_time < dt_time(14, 0): return "T1"
+    elif hora_time >= dt_time(14, 0) and hora_time < dt_time(22, 0): return "T2"
     else: return "T3"
 
-def ordenar_turnos(pendentes_por_turno):
+def ordenar_turnos(pendentes_por_turno, agora_br):
     ordem_turnos = ['T1', 'T2', 'T3']
-    t_atual = turno_atual()
+    t_atual = turno_atual(agora_br)
     idx = ordem_turnos.index(t_atual)
     nova_ordem = ordem_turnos[idx:] + ordem_turnos[:idx]
     turnos_existentes = {k: v for k, v in pendentes_por_turno.items() if k in nova_ordem}
     return sorted(turnos_existentes.items(), key=lambda x: nova_ordem.index(x[0]))
 
-def periodo_dia_customizado(agora_utc):
-    hoje = agora_utc.date()
+def periodo_dia_customizado(agora_br):
+    hoje = agora_br.date()
     inicio_dia = datetime.combine(hoje, dt_time(6, 0))
-    if agora_utc < inicio_dia:
+    if agora_br < inicio_dia:
         inicio_dia -= timedelta(days=1)
     fim_dia = inicio_dia + timedelta(days=1) - timedelta(seconds=1)
     return inicio_dia, fim_dia
@@ -105,6 +107,13 @@ def padronizar_doca(doca_str):
 # --- Função Principal ---
 def main():
     print(f"🔄 Script 'main' iniciado.")
+    
+    # 1. Definição do Horário BRASÍLIA (UTC-3)
+    # GitHub roda em UTC (+3h em relação ao BR). Subtraímos 3h para bater com a planilha.
+    agora_br = datetime.utcnow() - timedelta(hours=3)
+    agora_br = agora_br.replace(second=0, microsecond=0)
+    print(f"🕒 Horário de Referência (Brasília): {agora_br}")
+
     cliente = autenticar_e_criar_cliente()
     if not cliente: return
 
@@ -124,19 +133,19 @@ def main():
         enviar_webhook("❌ Falha crítica: Não foi possível ler a planilha após 3 tentativas.")
         return
 
-    # --- CONFIGURAÇÃO DOS NOVOS NOMES DE COLUNA ---
+    # --- NOMES DAS COLUNAS (Exatos da sua planilha) ---
     COL_TRIP    = 'LH Trip Nnumber'
     COL_ETA     = 'ETA Planejado'
     COL_ORIGEM  = 'Origem'
-    COL_CHECKIN = 'Checkin'  # Usada como prioridade para Chegada LT
-    COL_ENTRADA = 'Add to Queue Time' # Usada para cálculo de tempo e fallback de Chegada LT
+    COL_CHECKIN = 'Checkin'                      # Prioridade 1 para Tempo
+    COL_ENTRADA = 'Add to Queue Time'            # Prioridade 2 para Tempo
     COL_PACOTES = 'SUM de Pending Inbound Parcel Qty'
     COL_STATUS  = 'Status'
     COL_TURNO   = 'Turno'
     COL_DOCA    = 'Doca'
     # ---------------------------------------------
 
-    # 1. Tratamento de Cabeçalhos Duplicados (Segurança)
+    # 1. Tratamento de Cabeçalhos Duplicados
     headers_originais = [str(h).strip() for h in valores[0]]
     headers_unicos = []
     seen = {}
@@ -150,54 +159,48 @@ def main():
 
     # 2. Criação do DataFrame
     df = pd.DataFrame(valores[1:], columns=headers_unicos)
-    print("ℹ️ Colunas processadas com sucesso.")
-
-    # --- LÓGICA DE DATAS DE CHEGADA (D e G) ---
-    print("ℹ️ Processando datas de Chegada...")
-    # Tentamos pegar pelo nome exato, se não existir, tenta pelo índice como fallback
     
-    # Checkin (antiga Coluna D)
+    # --- CONVERSÃO DE DATAS ---
+    print("ℹ️ Convertendo colunas de data...")
+    
+    # Checkin
     if COL_CHECKIN in df.columns:
-        col_d = pd.to_datetime(df[COL_CHECKIN], dayfirst=True, errors='coerce')
+        df[COL_CHECKIN] = pd.to_datetime(df[COL_CHECKIN], dayfirst=True, errors='coerce')
     else:
-        # Fallback: Índice 3 (Coluna D)
-        col_d = pd.to_datetime(df.iloc[:, 3], dayfirst=True, errors='coerce')
+        # Tenta achar pelo índice (coluna D = 3) se o nome mudou
+        if len(df.columns) > 3:
+             df[COL_CHECKIN] = pd.to_datetime(df.iloc[:, 3], dayfirst=True, errors='coerce')
 
-    # Add to Queue Time (antiga Coluna G)
-    if COL_ENTRADA in df.columns:
-        col_g = pd.to_datetime(df[COL_ENTRADA], dayfirst=True, errors='coerce')
-    else:
-        # Fallback: Índice 6 (Coluna G)
-        col_g = pd.to_datetime(df.iloc[:, 6], dayfirst=True, errors='coerce')
-
-    # Cria a coluna consolidada 'Chegada LT' (Prioridade D, depois G)
-    df['Chegada LT'] = col_d.combine_first(col_g)
-    # ----------------------------------------
-
-    # Conversões e Limpeza
+    # Add to Queue Time
     if COL_ENTRADA in df.columns:
         df[COL_ENTRADA] = pd.to_datetime(df[COL_ENTRADA], dayfirst=True, errors='coerce')
-    
+    else:
+         # Tenta achar pelo índice (coluna G = 6)
+         if len(df.columns) > 6:
+             df[COL_ENTRADA] = pd.to_datetime(df.iloc[:, 6], dayfirst=True, errors='coerce')
+
+    # ETA
     if COL_ETA in df.columns:
         df[COL_ETA] = pd.to_datetime(df[COL_ETA], dayfirst=True, errors='coerce')
     
+    # Pacotes
     if COL_PACOTES in df.columns:
         df[COL_PACOTES] = pd.to_numeric(df[COL_PACOTES], errors='coerce').fillna(0).astype(int)
 
+    # Status e Filtros
     if COL_STATUS in df.columns:
         df[COL_STATUS] = df[COL_STATUS].astype(str).str.strip()
         df[COL_STATUS] = df[COL_STATUS].replace({'Pendente Recepção': 'pendente recepção', 'Pendente De Chegada': 'pendente de chegada'})
         # Filtro finalizado
         df = df[~df[COL_STATUS].fillna('').str.lower().str.contains('finalizado')]
 
-    agora_utc = datetime.utcnow().replace(second=0, microsecond=0)
-    inicio_dia, fim_dia = periodo_dia_customizado(agora_utc)
+    # Intervalo do dia (baseado em Brasília)
+    inicio_dia, fim_dia = periodo_dia_customizado(agora_br)
     
     em_doca, em_fila, pendentes_por_turno = [], [], {}
     pendentes_status = ['pendente de chegada', 'pendente recepção']
 
     for _, row in df.iterrows():
-        # Busca segura usando os nomes configurados
         trip = str(row.get(COL_TRIP, '???')).strip()
         status = str(row.get(COL_STATUS, '')).strip().lower()
         origem = row.get(COL_ORIGEM, '--')
@@ -211,19 +214,24 @@ def main():
             pendentes_por_turno[t]['lts'] += 1
             pendentes_por_turno[t]['pacotes'] += row.get(COL_PACOTES, 0)
 
-        # Logica Doca/Fila
-        entrada = row.get(COL_ENTRADA)
-        eta_str = eta.strftime('%d/%m %H:%M') if pd.notna(eta) else '--/-- --:--'
+        # --- LÓGICA DE TEMPO E CHEGADA (Checkin vs AddQueue) ---
+        # Prioriza Checkin. Se for NaT (vazio), usa Entrada.
+        val_checkin = row.get(COL_CHECKIN)
+        val_entrada = row.get(COL_ENTRADA)
         
-        chegada_val = row.get('Chegada LT')
-        chegada_str = chegada_val.strftime('%d/%m %H:%M') if pd.notna(chegada_val) else '--/-- --:--'
+        data_referencia = val_checkin if pd.notna(val_checkin) else val_entrada
+        
+        # Strings para exibição
+        eta_str = eta.strftime('%d/%m %H:%M') if pd.notna(eta) else '--/-- --:--'
+        chegada_str = data_referencia.strftime('%d/%m %H:%M') if pd.notna(data_referencia) else '--/-- --:--'
         
         doca_val = row.get(COL_DOCA, '--')
         doca_limpa = padronizar_doca(str(doca_val))
 
         minutos = None
-        if pd.notna(entrada):
-            minutos = int((agora_utc - entrada).total_seconds() / 60)
+        if pd.notna(data_referencia):
+            # Cálculo de Tempo: Agora (BR) - Chegada (BR)
+            minutos = int((agora_br - data_referencia).total_seconds() / 60)
 
         if minutos is not None:
             tempo_fmt = minutos_para_hhmm(minutos)
@@ -254,7 +262,8 @@ def main():
     if total_pend > 0:
         pcts = sum(d['pacotes'] for d in pendentes_por_turno.values())
         mensagem.append(f"⏳ Pendentes: {total_pend} LTs ({pcts} pct)")
-        for t, d in ordenar_turnos(pendentes_por_turno):
+        # Passa o horário BR para ordenar corretamente os turnos
+        for t, d in ordenar_turnos(pendentes_por_turno, agora_br):
             mensagem.append(f"- {d['lts']} LTs no {t}")
     elif not em_doca and not em_fila:
         mensagem.append("✅ Nenhuma pendência.")
