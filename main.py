@@ -35,15 +35,6 @@ def autenticar_e_criar_cliente():
         print(f"❌ Erro ao autenticar: {e}")
         return None
 
-# --- Função para Remover Colunas Duplicadas (CORREÇÃO DO ERRO) ---
-def deduplicar_colunas(df):
-    """Renomeia colunas duplicadas para evitar erro de 'Ambiguous Series'."""
-    cols = pd.Series(df.columns)
-    for dup in cols[cols.duplicated()].unique(): 
-        cols[cols[cols == dup].index.values.tolist()] = [dup + '.' + str(i) if i != 0 else dup for i in range(sum(cols == dup))]
-    df.columns = cols
-    return df
-
 # --- Função de Webhook ---
 def enviar_webhook(mensagem_txt):
     webhook_url = os.environ.get('SEATALK_WEBHOOK_URL') 
@@ -51,6 +42,7 @@ def enviar_webhook(mensagem_txt):
         print("❌ Erro: Variável 'SEATALK_WEBHOOK_URL' não definida.")
         return
     
+    # Preview no log
     print("--- CONTEÚDO DA MENSAGEM (PREVIEW) ---")
     print(mensagem_txt[:500] + ("\n... [restante da mensagem] ..." if len(mensagem_txt) > 500 else "")) 
     print("--------------------------------------")
@@ -133,18 +125,20 @@ def main():
         enviar_webhook("❌ Falha crítica: Não foi possível ler a planilha após 3 tentativas.")
         return
 
-    # Cria o DataFrame
+    # Cria o DataFrame Bruto
     df = pd.DataFrame(valores[1:], columns=valores[0])
     
-    # Limpa nomes das colunas (tira espaços)
+    # 1. Limpa espaços nos nomes das colunas
     df.columns = [col.strip() for col in df.columns]
-    
-    # --- NOVO: REMOVE DUPLICIDADES DE COLUNAS ---
-    # Isso impede o erro "Truth value of a Series is ambiguous"
-    df = deduplicar_colunas(df)
-    # --------------------------------------------
 
-    # Identificação dos cabeçalhos principais
+    # --- CORREÇÃO DO ERRO DE AMBIGUIDADE ---
+    # Se houver colunas duplicadas (mesmo nome), removemos as repetidas mantendo a primeira.
+    # Isso evita que df['Coluna'] retorne múltiplos valores e cause erro lógico.
+    df = df.loc[:, ~df.columns.duplicated()]
+    print("ℹ️ Colunas duplicadas removidas para evitar erros.")
+    # ----------------------------------------
+
+    # Identificação dos cabeçalhos principais (dinâmicos)
     try:
         header_eta = valores[0][1].strip()     # Coluna B
         header_origem = valores[0][28].strip() # Coluna AC
@@ -158,25 +152,38 @@ def main():
         header_origem: 'Origem',
         header_pacotes: 'Pacotes'
     }
-    df.rename(columns=mapeamento, inplace=True)
+    # Só renomeia se a coluna existir (segurança extra)
+    df.rename(columns={k: v for k, v in mapeamento.items() if k in df.columns}, inplace=True)
     
+    # Validação de Colunas Essenciais
+    cols_necessarias = ['LH Trip Nnumber', 'Satus 2.0', 'Add to Queue Time', 'Doca', 'Turno 2']
+    for col in cols_necessarias:
+        if col not in df.columns:
+            print(f"❌ Coluna crítica não encontrada: '{col}'")
+            return
+
     # Tratamento de Strings
     df['LH Trip Nnumber'] = df['LH Trip Nnumber'].astype(str).str.strip()
     df['Satus 2.0'] = df['Satus 2.0'].astype(str).str.strip()
     df['Doca'] = df['Doca'].astype(str).str.strip()
     df['Turno 2'] = df['Turno 2'].astype(str).str.strip()
     
-    # --- LÓGICA DE DATAS DE CHEGADA (Prioridade D, depois G) ---
+    # --- LÓGICA DE DATAS DE CHEGADA ---
     print("ℹ️ Processando datas de Chegada (Colunas D e G)...")
-    
-    # Usamos .copy() para garantir que é uma Series limpa
-    col_d_convertida = pd.to_datetime(df.iloc[:, 3], dayfirst=True, errors='coerce').copy()
-    col_g_convertida = pd.to_datetime(df.iloc[:, 6], dayfirst=True, errors='coerce').copy()
-    
-    df['Chegada LT'] = col_d_convertida.combine_first(col_g_convertida)
-    # -----------------------------------------------------------
+    # Acessa por posição (iloc) para garantir que pega a D (3) e G (6) do arquivo original
+    # Usamos .copy() para desvincular de qualquer referência duplicada
+    try:
+        raw_df = pd.DataFrame(valores[1:], columns=valores[0]) # Recarrega raw apenas para garantir posição
+        col_d = pd.to_datetime(raw_df.iloc[:, 3], dayfirst=True, errors='coerce')
+        col_g = pd.to_datetime(raw_df.iloc[:, 6], dayfirst=True, errors='coerce')
+        
+        # Atribui ao DataFrame limpo
+        df['Chegada LT'] = col_d.combine_first(col_g)
+    except Exception as e:
+        print(f"⚠️ Erro ao processar colunas D/G: {e}. Tentando fallback...")
+        df['Chegada LT'] = pd.NaT
 
-    # Outras conversões de Data
+    # Outras conversões
     df['Add to Queue Time'] = pd.to_datetime(df['Add to Queue Time'], dayfirst=True, errors='coerce')
     df['ETA Planejado'] = pd.to_datetime(df['ETA Planejado'], dayfirst=True, errors='coerce')
     df['Pacotes'] = pd.to_numeric(df['Pacotes'], errors='coerce').fillna(0).astype(int)
@@ -184,8 +191,8 @@ def main():
     # Filtros
     df['Satus 2.0'] = df['Satus 2.0'].replace({'Pendente Recepção': 'pendente recepção', 'Pendente De Chegada': 'pendente de chegada'})
     
-    # Filtro finalizado (agora seguro com colunas únicas)
-    df = df[~df['Satus 2.0'].str.lower().str.contains('finalizado', na=False)]
+    # Filtro 'finalizado' com segurança extra para NaN
+    df = df[~df['Satus 2.0'].fillna('').str.lower().str.contains('finalizado')]
 
     agora_utc = datetime.utcnow().replace(second=0, microsecond=0)
     inicio_dia, fim_dia = periodo_dia_customizado(agora_utc)
@@ -196,7 +203,7 @@ def main():
     for _, row in df.iterrows():
         trip = row['LH Trip Nnumber']
         status = str(row['Satus 2.0']).strip().lower()
-        origem = row['Origem'] if pd.notna(row['Origem']) and row['Origem'].strip() != '' else '--'
+        origem = row['Origem'] if 'Origem' in df.columns and pd.notna(row['Origem']) and str(row['Origem']).strip() != '' else '--'
         
         # Logica Pendentes
         if status in pendentes_status and pd.notna(row['ETA Planejado']) and inicio_dia <= row['ETA Planejado'] <= fim_dia:
@@ -209,7 +216,6 @@ def main():
         entrada = row['Add to Queue Time']
         eta_str = row['ETA Planejado'].strftime('%d/%m %H:%M') if pd.notna(row['ETA Planejado']) else '--/-- --:--'
         
-        # Pega a nova data combinada (D ou G)
         chegada_val = row['Chegada LT']
         chegada_str = chegada_val.strftime('%d/%m %H:%M') if pd.notna(chegada_val) else '--/-- --:--'
         
