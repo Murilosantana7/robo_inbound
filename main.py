@@ -35,14 +35,22 @@ def autenticar_e_criar_cliente():
         print(f"❌ Erro ao autenticar: {e}")
         return None
 
-# --- Função de Webhook (Com Logs Detalhados) ---
+# --- Função para Remover Colunas Duplicadas (CORREÇÃO DO ERRO) ---
+def deduplicar_colunas(df):
+    """Renomeia colunas duplicadas para evitar erro de 'Ambiguous Series'."""
+    cols = pd.Series(df.columns)
+    for dup in cols[cols.duplicated()].unique(): 
+        cols[cols[cols == dup].index.values.tolist()] = [dup + '.' + str(i) if i != 0 else dup for i in range(sum(cols == dup))]
+    df.columns = cols
+    return df
+
+# --- Função de Webhook ---
 def enviar_webhook(mensagem_txt):
     webhook_url = os.environ.get('SEATALK_WEBHOOK_URL') 
     if not webhook_url:
         print("❌ Erro: Variável 'SEATALK_WEBHOOK_URL' não definida.")
         return
     
-    # Mostra um pedaço da mensagem no log para conferência
     print("--- CONTEÚDO DA MENSAGEM (PREVIEW) ---")
     print(mensagem_txt[:500] + ("\n... [restante da mensagem] ..." if len(mensagem_txt) > 500 else "")) 
     print("--------------------------------------")
@@ -125,8 +133,16 @@ def main():
         enviar_webhook("❌ Falha crítica: Não foi possível ler a planilha após 3 tentativas.")
         return
 
+    # Cria o DataFrame
     df = pd.DataFrame(valores[1:], columns=valores[0])
+    
+    # Limpa nomes das colunas (tira espaços)
     df.columns = [col.strip() for col in df.columns]
+    
+    # --- NOVO: REMOVE DUPLICIDADES DE COLUNAS ---
+    # Isso impede o erro "Truth value of a Series is ambiguous"
+    df = deduplicar_colunas(df)
+    # --------------------------------------------
 
     # Identificação dos cabeçalhos principais
     try:
@@ -153,12 +169,10 @@ def main():
     # --- LÓGICA DE DATAS DE CHEGADA (Prioridade D, depois G) ---
     print("ℹ️ Processando datas de Chegada (Colunas D e G)...")
     
-    # Coluna D = Índice 3 | Coluna G = Índice 6
-    # dayfirst=True garante leitura correta de dd/mm/yyyy
-    col_d_convertida = pd.to_datetime(df.iloc[:, 3], dayfirst=True, errors='coerce')
-    col_g_convertida = pd.to_datetime(df.iloc[:, 6], dayfirst=True, errors='coerce')
+    # Usamos .copy() para garantir que é uma Series limpa
+    col_d_convertida = pd.to_datetime(df.iloc[:, 3], dayfirst=True, errors='coerce').copy()
+    col_g_convertida = pd.to_datetime(df.iloc[:, 6], dayfirst=True, errors='coerce').copy()
     
-    # Combina: Se D for válido usa D, senão usa G
     df['Chegada LT'] = col_d_convertida.combine_first(col_g_convertida)
     # -----------------------------------------------------------
 
@@ -169,6 +183,8 @@ def main():
 
     # Filtros
     df['Satus 2.0'] = df['Satus 2.0'].replace({'Pendente Recepção': 'pendente recepção', 'Pendente De Chegada': 'pendente de chegada'})
+    
+    # Filtro finalizado (agora seguro com colunas únicas)
     df = df[~df['Satus 2.0'].str.lower().str.contains('finalizado', na=False)]
 
     agora_utc = datetime.utcnow().replace(second=0, microsecond=0)
@@ -218,7 +234,6 @@ def main():
 
     mensagem = []
 
-    # --- LISTAGEM COMPLETA (SEM LIMITES) ---
     if em_doca:
         qtd = len(em_doca)
         texto = "\n".join([x[1] for x in em_doca])
@@ -228,7 +243,6 @@ def main():
         qtd = len(em_fila)
         texto = "\n".join([x[1] for x in em_fila])
         mensagem.append(f"🔴 Em Fila: {qtd} LT(s)\n{texto}")
-    # ---------------------------------------
 
     total_pend = sum(d['lts'] for d in pendentes_por_turno.values())
     if total_pend > 0:
