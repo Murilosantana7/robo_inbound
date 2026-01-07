@@ -35,38 +35,54 @@ def autenticar_e_criar_cliente():
         print(f"❌ Erro ao autenticar: {e}")
         return None
 
-# --- Função de Webhook ---
+# --- Função de Webhook (COM PAGINAÇÃO INTELIGENTE) ---
 def enviar_webhook(mensagem_txt):
     webhook_url = os.environ.get('SEATALK_WEBHOOK_URL') 
     if not webhook_url:
         print("❌ Erro: Variável 'SEATALK_WEBHOOK_URL' não definida.")
         return
     
-    print("--- CONTEÚDO DA MENSAGEM (PREVIEW) ---")
-    print(mensagem_txt[:500] + ("\n... [restante da mensagem] ..." if len(mensagem_txt) > 500 else "")) 
-    print("--------------------------------------")
-
-    try:
-        payload = {
-            "tag": "text",
-            "text": { "format": 1, "content": f"```\n{mensagem_txt}\n```" }
-        }
-        response = requests.post(webhook_url, json=payload)
-        response.raise_for_status()
-        
-        try:
-            resp_json = response.json()
-            if resp_json.get('code') not in [0, 200]:
-                print(f"⚠️ AVISO SEATALK: {resp_json}")
+    # Limite de segurança do Seatalk (aprox 4096, usamos 3800 para garantir)
+    limite = 3800 
+    partes = []
+    
+    # Se a mensagem for maior que o limite, divide em blocos
+    if len(mensagem_txt) > limite:
+        print(f"⚠️ Mensagem longa ({len(mensagem_txt)} chars). Dividindo em partes...")
+        while len(mensagem_txt) > 0:
+            if len(mensagem_txt) > limite:
+                # Procura a última quebra de linha antes do limite para não cortar texto no meio
+                corte = mensagem_txt.rfind('\n', 0, limite)
+                if corte == -1: corte = limite
+                
+                partes.append(mensagem_txt[:corte])
+                mensagem_txt = mensagem_txt[corte:] # O restante
             else:
-                print("✅ Mensagem enviada com sucesso!")
-        except:
-            print("✅ Mensagem enviada (Resposta não-JSON).")
-        
-    except requests.exceptions.RequestException as err:
-        print(f"❌ Erro de conexão/HTTP ao enviar webhook: {err}")
-        if hasattr(err, 'response') and err.response is not None:
-             print(f"   Detalhe da resposta: {err.response.text}")
+                partes.append(mensagem_txt)
+                break
+    else:
+        partes.append(mensagem_txt)
+
+    # Envia cada parte sequencialmente
+    for i, parte in enumerate(partes):
+        print(f"📤 Enviando parte {i+1}/{len(partes)}...")
+        try:
+            # Adiciona indicador de parte se houver mais de uma
+            texto_final = parte
+            if len(partes) > 1:
+                texto_final = f"({i+1}/{len(partes)})\n{parte}"
+
+            payload = {
+                "tag": "text",
+                "text": { "format": 1, "content": f"```\n{texto_final}\n```" }
+            }
+            response = requests.post(webhook_url, json=payload)
+            response.raise_for_status()
+            time.sleep(1) # Pausa para garantir a ordem de chegada
+        except Exception as e:
+            print(f"❌ Erro ao enviar parte {i+1}: {e}")
+
+    print("✅ Processo de envio finalizado.")
 
 # --- Funções Auxiliares ---
 def minutos_para_hhmm(minutos):
@@ -74,7 +90,8 @@ def minutos_para_hhmm(minutos):
     m = abs(minutos)
     horas = m // 60
     mins = m % 60
-    return f"{sinal}{horas:02d}:{mins:02d}h"
+    # Retorna HH:MM (sem o 'h' para economizar espaço na tabela)
+    return f"{sinal}{horas:02d}:{mins:02d}"
 
 def turno_atual(agora_br):
     hora_time = agora_br.time()
@@ -183,8 +200,8 @@ def main():
     for _, row in df.iterrows():
         trip = str(row.get(COL_TRIP, '???')).strip()
         status = str(row.get(COL_STATUS, '')).strip().lower()
-        origem = row.get(COL_ORIGEM, '--')
-        if pd.isna(origem) or str(origem).strip() == '': origem = '--'
+        origem = str(row.get(COL_ORIGEM, '--')).strip() # ORIGEM ORIGINAL
+        if not origem: origem = "--"
         
         eta = row.get(COL_ETA)
         if status in pendentes_status and pd.notna(eta) and inicio_dia <= eta <= fim_dia:
@@ -210,26 +227,23 @@ def main():
         if pd.notna(data_referencia) or status == 'em doca' or 'fila' in status:
             tempo_fmt = minutos_para_hhmm(minutos) if minutos != -999999 else "--:--"
             
-            # --- TABELA SEM HÍFEN E ALINHADA ---
-            linha_tabela = f"{trip:^14} | {doca_limpa:^8} | {eta_str:^13} | {chegada_str:^13} | {tempo_fmt:^11} | {origem}"
+            # --- TABELA SUPER COMPACTA (Sem espaços ao redor do pipe) ---
+            # Trip:13 | Doca:4 | ETA:11 | Cheg:11 | Tempo:6 | Origem:Livre
+            linha_tabela = f"{trip:^13}|{doca_limpa:^4}|{eta_str:^11}|{chegada_str:^11}|{tempo_fmt:^6}| {origem}"
             
             if 'fila' in status:
                 em_fila.append((minutos, linha_tabela))
             elif status == 'em doca':
                 em_doca.append((minutos, linha_tabela))
 
-    # --- ORDENAÇÃO E LIMITE DE 30 LINHAS ---
+    # --- ORDENAÇÃO (SEM CORTES) ---
     em_doca.sort(key=lambda x: x[0], reverse=True)
     em_fila.sort(key=lambda x: x[0], reverse=True)
 
-    # Aplica o corte para evitar erro de tamanho no Seatalk
-    em_doca = em_doca[:30]
-    em_fila = em_fila[:30]
-
     mensagem = []
     
-    # Cabeçalho ajustado sem os espaços iniciais
-    header_tabela = f"{'LT':^14} | {'Doca':^8} | {'ETA':^13} | {'Chegada':^13} | {'Tempo CD':^11} | Origem"
+    # Cabeçalho Compacto (Sem hifens, sem espaços extras)
+    header_tabela = f"{'LT':^13}|{'Doca':^4}|{'ETA':^11}|{'Chegada':^11}|{'Tempo':^6}| Origem"
 
     if em_doca:
         qtd = len(em_doca)
@@ -255,7 +269,7 @@ def main():
         return
 
     msg_final = "Segue as LH´s com mais tempo de Pátio:\n\n" + "\n\n".join(mensagem)
-    print("📤 Enviando mensagem formatada...")
+    print("📤 Enviando mensagem...")
     enviar_webhook(msg_final)
 
 if __name__ == '__main__':
