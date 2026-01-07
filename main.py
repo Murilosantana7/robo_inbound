@@ -109,7 +109,6 @@ def main():
     print(f"🔄 Script 'main' iniciado.")
     
     # 1. Definição do Horário BRASÍLIA (UTC-3)
-    # GitHub roda em UTC (+3h em relação ao BR). Subtraímos 3h para bater com a planilha.
     agora_br = datetime.utcnow() - timedelta(hours=3)
     agora_br = agora_br.replace(second=0, microsecond=0)
     print(f"🕒 Horário de Referência (Brasília): {agora_br}")
@@ -133,17 +132,17 @@ def main():
         enviar_webhook("❌ Falha crítica: Não foi possível ler a planilha após 3 tentativas.")
         return
 
-    # --- NOMES DAS COLUNAS (Exatos da sua planilha) ---
+    # --- CONFIGURAÇÃO DE COLUNAS ---
     COL_TRIP    = 'LH Trip Nnumber'
     COL_ETA     = 'ETA Planejado'
-    COL_ORIGEM  = 'Origem'
-    COL_CHECKIN = 'Checkin'                      # Prioridade 1 para Tempo
-    COL_ENTRADA = 'Add to Queue Time'            # Prioridade 2 para Tempo
+    COL_ORIGEM  = 'station_code'             # Reporte usa o código da estação
+    COL_CHECKIN = 'Checkin'                  # Prioridade 1 para Tempo/Chegada
+    COL_ENTRADA = 'Add to Queue Time'        # Prioridade 2 para Tempo/Chegada
     COL_PACOTES = 'SUM de Pending Inbound Parcel Qty'
     COL_STATUS  = 'Status'
     COL_TURNO   = 'Turno'
     COL_DOCA    = 'Doca'
-    # ---------------------------------------------
+    # --------------------------------
 
     # 1. Tratamento de Cabeçalhos Duplicados
     headers_originais = [str(h).strip() for h in valores[0]]
@@ -167,7 +166,7 @@ def main():
     if COL_CHECKIN in df.columns:
         df[COL_CHECKIN] = pd.to_datetime(df[COL_CHECKIN], dayfirst=True, errors='coerce')
     else:
-        # Tenta achar pelo índice (coluna D = 3) se o nome mudou
+        # Fallback pelo índice D (3)
         if len(df.columns) > 3:
              df[COL_CHECKIN] = pd.to_datetime(df.iloc[:, 3], dayfirst=True, errors='coerce')
 
@@ -175,7 +174,7 @@ def main():
     if COL_ENTRADA in df.columns:
         df[COL_ENTRADA] = pd.to_datetime(df[COL_ENTRADA], dayfirst=True, errors='coerce')
     else:
-         # Tenta achar pelo índice (coluna G = 6)
+         # Fallback pelo índice G (6)
          if len(df.columns) > 6:
              df[COL_ENTRADA] = pd.to_datetime(df.iloc[:, 6], dayfirst=True, errors='coerce')
 
@@ -194,7 +193,6 @@ def main():
         # Filtro finalizado
         df = df[~df[COL_STATUS].fillna('').str.lower().str.contains('finalizado')]
 
-    # Intervalo do dia (baseado em Brasília)
     inicio_dia, fim_dia = periodo_dia_customizado(agora_br)
     
     em_doca, em_fila, pendentes_por_turno = [], [], {}
@@ -214,35 +212,39 @@ def main():
             pendentes_por_turno[t]['lts'] += 1
             pendentes_por_turno[t]['pacotes'] += row.get(COL_PACOTES, 0)
 
-        # --- LÓGICA DE TEMPO E CHEGADA (Checkin vs AddQueue) ---
-        # Prioriza Checkin. Se for NaT (vazio), usa Entrada.
+        # --- LÓGICA DE TEMPO E CHEGADA ---
         val_checkin = row.get(COL_CHECKIN)
         val_entrada = row.get(COL_ENTRADA)
         
+        # Prioriza Checkin. Se vazio, usa Entrada.
         data_referencia = val_checkin if pd.notna(val_checkin) else val_entrada
         
-        # Strings para exibição
         eta_str = eta.strftime('%d/%m %H:%M') if pd.notna(eta) else '--/-- --:--'
         chegada_str = data_referencia.strftime('%d/%m %H:%M') if pd.notna(data_referencia) else '--/-- --:--'
         
         doca_val = row.get(COL_DOCA, '--')
         doca_limpa = padronizar_doca(str(doca_val))
 
-        minutos = None
+        minutos = -999999 # Valor padrão muito baixo para ficar no final se não tiver data
         if pd.notna(data_referencia):
             # Cálculo de Tempo: Agora (BR) - Chegada (BR)
             minutos = int((agora_br - data_referencia).total_seconds() / 60)
 
-        if minutos is not None:
-            tempo_fmt = minutos_para_hhmm(minutos)
+        if pd.notna(data_referencia) or status == 'em doca' or 'fila' in status:
+            # Só formata se tiver minutos válidos, senão fica vazio ou --
+            tempo_fmt = minutos_para_hhmm(minutos) if minutos != -999999 else "--:--"
+            
             linha_msg = f"- {trip} | Doca: {doca_limpa} | ETA: {eta_str} | Chegada: {chegada_str} | Tempo: {tempo_fmt} | {origem}"
             
+            # Armazena Tupla: (MinutosNuméricos, MensagemTexto) para ordenar depois
             if 'fila' in status:
                 linha_msg = f"- {trip} | ETA: {eta_str} | Chegada: {chegada_str} | Tempo: {tempo_fmt} | {origem}"
                 em_fila.append((minutos, linha_msg))
             elif status == 'em doca':
                 em_doca.append((minutos, linha_msg))
 
+    # --- ORDENAÇÃO (Maior tempo primeiro) ---
+    # x[0] é o valor 'minutos'. reverse=True coloca os maiores (mais tempo de espera) no topo.
     em_doca.sort(key=lambda x: x[0], reverse=True)
     em_fila.sort(key=lambda x: x[0], reverse=True)
 
@@ -250,6 +252,7 @@ def main():
 
     if em_doca:
         qtd = len(em_doca)
+        # Pega apenas o texto (item 1 da tupla) para exibir
         texto = "\n".join([x[1] for x in em_doca])
         mensagem.append(f"🚛 Em Doca: {qtd} LT(s)\n{texto}")
 
@@ -262,7 +265,6 @@ def main():
     if total_pend > 0:
         pcts = sum(d['pacotes'] for d in pendentes_por_turno.values())
         mensagem.append(f"⏳ Pendentes: {total_pend} LTs ({pcts} pct)")
-        # Passa o horário BR para ordenar corretamente os turnos
         for t, d in ordenar_turnos(pendentes_por_turno, agora_br):
             mensagem.append(f"- {d['lts']} LTs no {t}")
     elif not em_doca and not em_fila:
