@@ -42,7 +42,6 @@ def enviar_webhook(mensagem_txt):
         print("❌ Erro: Variável 'SEATALK_WEBHOOK_URL' não definida.")
         return
     
-    # Preview no log
     print("--- CONTEÚDO DA MENSAGEM (PREVIEW) ---")
     print(mensagem_txt[:500] + ("\n... [restante da mensagem] ..." if len(mensagem_txt) > 500 else "")) 
     print("--------------------------------------")
@@ -125,74 +124,86 @@ def main():
         enviar_webhook("❌ Falha crítica: Não foi possível ler a planilha após 3 tentativas.")
         return
 
-    # Cria o DataFrame Bruto
-    df = pd.DataFrame(valores[1:], columns=valores[0])
+    # --- TRATAMENTO DE CABEÇALHOS DUPLICADOS ---
+    # Antes de criar o DataFrame, vamos garantir que os nomes sejam únicos
+    headers = [h.strip() for h in valores[0]]
+    seen = {}
+    unique_headers = []
+    for h in headers:
+        if h in seen:
+            seen[h] += 1
+            unique_headers.append(f"{h}_{seen[h]}") # Ex: Status_1
+        else:
+            seen[h] = 0
+            unique_headers.append(h)
     
-    # 1. Limpa espaços nos nomes das colunas
-    df.columns = [col.strip() for col in df.columns]
+    # Cria o DataFrame com os cabeçalhos únicos
+    df = pd.DataFrame(valores[1:], columns=unique_headers)
+    print("ℹ️ Cabeçalhos processados e duplicatas renomeadas.")
 
-    # --- CORREÇÃO DO ERRO DE AMBIGUIDADE ---
-    # Se houver colunas duplicadas (mesmo nome), removemos as repetidas mantendo a primeira.
-    # Isso evita que df['Coluna'] retorne múltiplos valores e cause erro lógico.
-    df = df.loc[:, ~df.columns.duplicated()]
-    print("ℹ️ Colunas duplicadas removidas para evitar erros.")
-    # ----------------------------------------
-
-    # Identificação dos cabeçalhos principais (dinâmicos)
+    # Mapeamento seguro (usando os nomes únicos ou originais)
+    # Aqui, a lógica de 'só usar o número' é aplicada acessando o que está na posição correta
     try:
-        header_eta = valores[0][1].strip()     # Coluna B
-        header_origem = valores[0][28].strip() # Coluna AC
-        header_pacotes = valores[0][5].strip() # Coluna F
-    except:
-        print("❌ Erro de estrutura da planilha (colunas insuficientes).")
+        # Recupera os nomes exatos que ficaram nas posições esperadas
+        # Coluna B (Indice 1)
+        name_eta = unique_headers[1]
+        # Coluna F (Indice 5)
+        name_pacotes = unique_headers[5]
+        # Coluna AC (Indice 28) - Verificando se existe
+        name_origem = unique_headers[28] if len(unique_headers) > 28 else None
+    except IndexError:
+        print("❌ Erro: Planilha com menos colunas do que o esperado.")
         return
 
-    mapeamento = {
-        header_eta: 'ETA Planejado',
-        header_origem: 'Origem',
-        header_pacotes: 'Pacotes'
+    # Renomeia para padronizar o uso no script
+    rename_map = {
+        name_eta: 'ETA Planejado',
+        name_pacotes: 'Pacotes'
     }
-    # Só renomeia se a coluna existir (segurança extra)
-    df.rename(columns={k: v for k, v in mapeamento.items() if k in df.columns}, inplace=True)
-    
-    # Validação de Colunas Essenciais
-    cols_necessarias = ['LH Trip Nnumber', 'Satus 2.0', 'Add to Queue Time', 'Doca', 'Turno 2']
-    for col in cols_necessarias:
-        if col not in df.columns:
-            print(f"❌ Coluna crítica não encontrada: '{col}'")
-            return
-
-    # Tratamento de Strings
-    df['LH Trip Nnumber'] = df['LH Trip Nnumber'].astype(str).str.strip()
-    df['Satus 2.0'] = df['Satus 2.0'].astype(str).str.strip()
-    df['Doca'] = df['Doca'].astype(str).str.strip()
-    df['Turno 2'] = df['Turno 2'].astype(str).str.strip()
-    
-    # --- LÓGICA DE DATAS DE CHEGADA ---
-    print("ℹ️ Processando datas de Chegada (Colunas D e G)...")
-    # Acessa por posição (iloc) para garantir que pega a D (3) e G (6) do arquivo original
-    # Usamos .copy() para desvincular de qualquer referência duplicada
-    try:
-        raw_df = pd.DataFrame(valores[1:], columns=valores[0]) # Recarrega raw apenas para garantir posição
-        col_d = pd.to_datetime(raw_df.iloc[:, 3], dayfirst=True, errors='coerce')
-        col_g = pd.to_datetime(raw_df.iloc[:, 6], dayfirst=True, errors='coerce')
+    if name_origem:
+        rename_map[name_origem] = 'Origem'
         
-        # Atribui ao DataFrame limpo
-        df['Chegada LT'] = col_d.combine_first(col_g)
-    except Exception as e:
-        print(f"⚠️ Erro ao processar colunas D/G: {e}. Tentando fallback...")
-        df['Chegada LT'] = pd.NaT
+    df.rename(columns=rename_map, inplace=True)
+    
+    # Tratamento de Strings
+    # Verifica se as colunas existem antes de tentar converter
+    for col in ['LH Trip Nnumber', 'Satus 2.0', 'Doca', 'Turno 2']:
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.strip()
+        else:
+            # Tenta achar variação com sufixo (ex: Satus 2.0_1)
+            found = False
+            for c in df.columns:
+                if c.startswith(col):
+                    df.rename(columns={c: col}, inplace=True)
+                    df[col] = df[col].astype(str).str.strip()
+                    found = True
+                    break
+            if not found:
+                print(f"⚠️ Aviso: Coluna '{col}' não encontrada (nem duplicada).")
 
-    # Outras conversões
-    df['Add to Queue Time'] = pd.to_datetime(df['Add to Queue Time'], dayfirst=True, errors='coerce')
+    # --- LÓGICA DE DATAS DE CHEGADA (PELO NÚMERO DA COLUNA) ---
+    print("ℹ️ Processando datas de Chegada (Colunas D e G)...")
+    # Coluna D = Índice 3 | Coluna G = Índice 6
+    # Acessa diretamente pelo número (iloc), ignorando totalmente o nome
+    col_d_convertida = pd.to_datetime(df.iloc[:, 3], dayfirst=True, errors='coerce')
+    col_g_convertida = pd.to_datetime(df.iloc[:, 6], dayfirst=True, errors='coerce')
+    
+    df['Chegada LT'] = col_d_convertida.combine_first(col_g_convertida)
+    # -----------------------------------------------------------
+
+    # Outras conversões de Data
+    if 'Add to Queue Time' in df.columns:
+        df['Add to Queue Time'] = pd.to_datetime(df['Add to Queue Time'], dayfirst=True, errors='coerce')
+    
     df['ETA Planejado'] = pd.to_datetime(df['ETA Planejado'], dayfirst=True, errors='coerce')
     df['Pacotes'] = pd.to_numeric(df['Pacotes'], errors='coerce').fillna(0).astype(int)
 
     # Filtros
-    df['Satus 2.0'] = df['Satus 2.0'].replace({'Pendente Recepção': 'pendente recepção', 'Pendente De Chegada': 'pendente de chegada'})
-    
-    # Filtro 'finalizado' com segurança extra para NaN
-    df = df[~df['Satus 2.0'].fillna('').str.lower().str.contains('finalizado')]
+    if 'Satus 2.0' in df.columns:
+        df['Satus 2.0'] = df['Satus 2.0'].replace({'Pendente Recepção': 'pendente recepção', 'Pendente De Chegada': 'pendente de chegada'})
+        # Filtro finalizado
+        df = df[~df['Satus 2.0'].fillna('').str.lower().str.contains('finalizado')]
 
     agora_utc = datetime.utcnow().replace(second=0, microsecond=0)
     inicio_dia, fim_dia = periodo_dia_customizado(agora_utc)
@@ -201,25 +212,27 @@ def main():
     pendentes_status = ['pendente de chegada', 'pendente recepção']
 
     for _, row in df.iterrows():
-        trip = row['LH Trip Nnumber']
-        status = str(row['Satus 2.0']).strip().lower()
+        # Verifica existência das colunas antes de ler
+        trip = row['LH Trip Nnumber'] if 'LH Trip Nnumber' in df.columns else '???'
+        status = str(row['Satus 2.0']).strip().lower() if 'Satus 2.0' in df.columns else ''
         origem = row['Origem'] if 'Origem' in df.columns and pd.notna(row['Origem']) and str(row['Origem']).strip() != '' else '--'
         
         # Logica Pendentes
         if status in pendentes_status and pd.notna(row['ETA Planejado']) and inicio_dia <= row['ETA Planejado'] <= fim_dia:
-            t = row['Turno 2']
+            t = row['Turno 2'] if 'Turno 2' in df.columns else 'Indef'
             if t not in pendentes_por_turno: pendentes_por_turno[t] = {'lts': 0, 'pacotes': 0}
             pendentes_por_turno[t]['lts'] += 1
             pendentes_por_turno[t]['pacotes'] += row['Pacotes']
 
         # Logica Doca/Fila
-        entrada = row['Add to Queue Time']
+        entrada = row['Add to Queue Time'] if 'Add to Queue Time' in df.columns else pd.NaT
         eta_str = row['ETA Planejado'].strftime('%d/%m %H:%M') if pd.notna(row['ETA Planejado']) else '--/-- --:--'
         
         chegada_val = row['Chegada LT']
         chegada_str = chegada_val.strftime('%d/%m %H:%M') if pd.notna(chegada_val) else '--/-- --:--'
         
-        doca_limpa = padronizar_doca(row['Doca'])
+        doca_val = row['Doca'] if 'Doca' in df.columns else '--'
+        doca_limpa = padronizar_doca(str(doca_val))
 
         minutos = None
         if pd.notna(entrada):
