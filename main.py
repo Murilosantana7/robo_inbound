@@ -15,43 +15,6 @@ SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 SPREADSHEET_ID = '1TfzqJZFD3yPNCAXAiLyEw876qjOlitae0pP9TTqNCPI'
 NOME_ABA = 'Tabela dinâmica 2'
 
-# --- FUNÇÃO DE ESPERA ("O PORTÃO") ---
-def aguardar_horario_correto():
-    """
-    Verifica se é hora cheia (XX:00) ou meia hora (XX:30).
-    Se não for, aguarda até o próximo intervalo.
-    """
-    print(f"Iniciando verificação de horário às {datetime.utcnow().strftime('%H:%M:%S')} (Fuso UTC do Servidor)")
-    
-    while True:
-        # O GitHub Actions roda em UTC. Os minutos coincidem com o Brasil
-        agora_utc = datetime.utcnow()
-        minutos_atuais = agora_utc.minute
-        
-        # Verifica se é hora cheia (00) ou meia hora (30)
-        if minutos_atuais == 0 or minutos_atuais == 30:
-            print(f"✅ 'Portão' aberto: {agora_utc.strftime('%H:%M:%S')} UTC")
-            print("Iniciando coleta de dados...")
-            break # Libera a execução
-        else:
-            # Calcula quanto tempo falta
-            if minutos_atuais < 30:
-                minutos_faltando = 30 - minutos_atuais
-                proximo_horario_str = f"{agora_utc.hour:02d}:30"
-            else:
-                minutos_faltando = 60 - minutos_atuais
-                proxima_hora = (agora_utc.hour + 1) % 24
-                proximo_horario_str = f"{proxima_hora:02d}:00"
-            
-            # Espera de forma inteligente
-            segundos_para_o_proximo_check = 30 - (agora_utc.second % 30)
-            
-            print(f"⏳ Horário atual: {agora_utc.strftime('%H:%M:%S')} UTC")
-            print(f"   Aguardando o 'portão' abrir às {proximo_horario_str} (faltam ~{minutos_faltando} min)")
-            print(f"   Próxima verificação em {segundos_para_o_proximo_check} segundos...")
-            
-            time.sleep(segundos_para_o_proximo_check)
-
 # --- Função de Autenticação ---
 def autenticar_e_criar_cliente():
     creds_raw = os.environ.get('GCP_SA_KEY_JSON', '').strip()
@@ -107,7 +70,6 @@ def enviar_webhook(mensagem_txt):
 
 # --- Funções Auxiliares ---
 def minutos_para_hhmm(minutos):
-    # Formata para HH:MMh
     sinal = "-" if minutos < 0 else ""
     m = abs(minutos)
     horas = m // 60
@@ -115,7 +77,6 @@ def minutos_para_hhmm(minutos):
     return f"{sinal}{horas:02d}:{mins:02d}h"
 
 def turno_atual(agora_br):
-    # Recebe o horário BR e define o turno
     hora_time = agora_br.time()
     if hora_time >= dt_time(6, 0) and hora_time < dt_time(14, 0): return "T1"
     elif hora_time >= dt_time(14, 0) and hora_time < dt_time(22, 0): return "T2"
@@ -145,7 +106,6 @@ def padronizar_doca(doca_str):
 def main():
     print(f"🔄 Script 'main' iniciado.")
     
-    # 1. Definição do Horário BRASÍLIA (UTC-3)
     agora_br = datetime.utcnow() - timedelta(hours=3)
     agora_br = agora_br.replace(second=0, microsecond=0)
     print(f"🕒 Horário de Referência (Brasília): {agora_br}")
@@ -154,7 +114,6 @@ def main():
     if not cliente: return
 
     valores = None
-    # Retry simples de conexão
     for i in range(3):
         try:
             planilha = cliente.open_by_key(SPREADSHEET_ID)
@@ -180,9 +139,7 @@ def main():
     COL_STATUS  = 'Status'
     COL_TURNO   = 'Turno'
     COL_DOCA    = 'Doca'
-    # --------------------------------
 
-    # 1. Tratamento de Cabeçalhos
     headers_originais = [str(h).strip() for h in valores[0]]
     headers_unicos = []
     seen = {}
@@ -194,12 +151,9 @@ def main():
             seen[h] = 0
             headers_unicos.append(h)
 
-    # 2. Criação do DataFrame
     df = pd.DataFrame(valores[1:], columns=headers_unicos)
     
-    # --- CONVERSÃO DE DATAS ---
     print("ℹ️ Convertendo colunas de data...")
-    
     if COL_CHECKIN in df.columns:
         df[COL_CHECKIN] = pd.to_datetime(df[COL_CHECKIN], dayfirst=True, errors='coerce')
     else:
@@ -216,7 +170,6 @@ def main():
     if COL_PACOTES in df.columns:
         df[COL_PACOTES] = pd.to_numeric(df[COL_PACOTES], errors='coerce').fillna(0).astype(int)
 
-    # Status e Filtros
     if COL_STATUS in df.columns:
         df[COL_STATUS] = df[COL_STATUS].astype(str).str.strip()
         df[COL_STATUS] = df[COL_STATUS].replace({'Pendente Recepção': 'pendente recepção', 'Pendente De Chegada': 'pendente de chegada'})
@@ -233,7 +186,6 @@ def main():
         origem = row.get(COL_ORIGEM, '--')
         if pd.isna(origem) or str(origem).strip() == '': origem = '--'
         
-        # Logica Pendentes
         eta = row.get(COL_ETA)
         if status in pendentes_status and pd.notna(eta) and inicio_dia <= eta <= fim_dia:
             t = str(row.get(COL_TURNO, 'Indef')).strip()
@@ -241,10 +193,8 @@ def main():
             pendentes_por_turno[t]['lts'] += 1
             pendentes_por_turno[t]['pacotes'] += row.get(COL_PACOTES, 0)
 
-        # --- LÓGICA DE TEMPO E CHEGADA ---
         val_checkin = row.get(COL_CHECKIN)
         val_entrada = row.get(COL_ENTRADA)
-        
         data_referencia = val_checkin if pd.notna(val_checkin) else val_entrada
         
         eta_str = eta.strftime('%d/%m %H:%M') if pd.notna(eta) else '--/-- --:--'
@@ -260,23 +210,26 @@ def main():
         if pd.notna(data_referencia) or status == 'em doca' or 'fila' in status:
             tempo_fmt = minutos_para_hhmm(minutos) if minutos != -999999 else "--:--"
             
-            # --- FORMATAÇÃO TABULAR ---
-            # AQUI FOI ALTERADO: {trip:^14} para centralizar
-            linha_tabela = f"- {trip:^14} | {doca_limpa:^8} | {eta_str:^13} | {chegada_str:^13} | {tempo_fmt:^11} | {origem}"
+            # --- TABELA SEM HÍFEN E ALINHADA ---
+            linha_tabela = f"{trip:^14} | {doca_limpa:^8} | {eta_str:^13} | {chegada_str:^13} | {tempo_fmt:^11} | {origem}"
             
             if 'fila' in status:
                 em_fila.append((minutos, linha_tabela))
             elif status == 'em doca':
                 em_doca.append((minutos, linha_tabela))
 
-    # --- ORDENAÇÃO ---
+    # --- ORDENAÇÃO E LIMITE DE 30 LINHAS ---
     em_doca.sort(key=lambda x: x[0], reverse=True)
     em_fila.sort(key=lambda x: x[0], reverse=True)
 
+    # Aplica o corte para evitar erro de tamanho no Seatalk
+    em_doca = em_doca[:30]
+    em_fila = em_fila[:30]
+
     mensagem = []
     
-    # Cabeçalho da Tabela (AQUI FOI ALTERADO: {'LT':^14} para centralizar)
-    header_tabela = f"  {'LT':^14} | {'Doca':^8} | {'ETA':^13} | {'Chegada':^13} | {'Tempo CD':^11} | Origem"
+    # Cabeçalho ajustado sem os espaços iniciais
+    header_tabela = f"{'LT':^14} | {'Doca':^8} | {'ETA':^13} | {'Chegada':^13} | {'Tempo CD':^11} | Origem"
 
     if em_doca:
         qtd = len(em_doca)
@@ -306,9 +259,6 @@ def main():
     enviar_webhook(msg_final)
 
 if __name__ == '__main__':
-    # --- TRAVA DE PORTÃO ATIVADA ---
-    aguardar_horario_correto()
-    
     try:
         main()
     except Exception as e:
