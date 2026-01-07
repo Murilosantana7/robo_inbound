@@ -15,6 +15,43 @@ SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 SPREADSHEET_ID = '1TfzqJZFD3yPNCAXAiLyEw876qjOlitae0pP9TTqNCPI'
 NOME_ABA = 'Tabela dinâmica 2'
 
+# --- FUNÇÃO DE ESPERA ("O PORTÃO") ---
+def aguardar_horario_correto():
+    """
+    Verifica se é hora cheia (XX:00) ou meia hora (XX:30).
+    Se não for, aguarda até o próximo intervalo.
+    """
+    print(f"Iniciando verificação de horário às {datetime.utcnow().strftime('%H:%M:%S')} (Fuso UTC do Servidor)")
+    
+    while True:
+        # O GitHub Actions roda em UTC. Os minutos coincidem com o Brasil (ex: 12:30 UTC é 09:30 BRT)
+        agora_utc = datetime.utcnow()
+        minutos_atuais = agora_utc.minute
+        
+        # Verifica se é hora cheia (00) ou meia hora (30)
+        if minutos_atuais == 0 or minutos_atuais == 30:
+            print(f"✅ 'Portão' aberto: {agora_utc.strftime('%H:%M:%S')} UTC")
+            print("Iniciando coleta de dados...")
+            break # Libera a execução
+        else:
+            # Calcula quanto tempo falta
+            if minutos_atuais < 30:
+                minutos_faltando = 30 - minutos_atuais
+                proximo_horario_str = f"{agora_utc.hour:02d}:30"
+            else:
+                minutos_faltando = 60 - minutos_atuais
+                proxima_hora = (agora_utc.hour + 1) % 24
+                proximo_horario_str = f"{proxima_hora:02d}:00"
+            
+            # Espera de forma inteligente
+            segundos_para_o_proximo_check = 30 - (agora_utc.second % 30)
+            
+            print(f"⏳ Horário atual: {agora_utc.strftime('%H:%M:%S')} UTC")
+            print(f"   Aguardando o 'portão' abrir às {proximo_horario_str} (faltam ~{minutos_faltando} min)")
+            print(f"   Próxima verificação em {segundos_para_o_proximo_check} segundos...")
+            
+            time.sleep(segundos_para_o_proximo_check)
+
 # --- Função de Autenticação ---
 def autenticar_e_criar_cliente():
     creds_raw = os.environ.get('GCP_SA_KEY_JSON', '').strip()
@@ -108,7 +145,7 @@ def padronizar_doca(doca_str):
 def main():
     print(f"🔄 Script 'main' iniciado.")
     
-    # 1. Definição do Horário BRASÍLIA (UTC-3)
+    # 1. Definição do Horário BRASÍLIA (UTC-3) para cálculos corretos
     agora_br = datetime.utcnow() - timedelta(hours=3)
     agora_br = agora_br.replace(second=0, microsecond=0)
     print(f"🕒 Horário de Referência (Brasília): {agora_br}")
@@ -117,6 +154,7 @@ def main():
     if not cliente: return
 
     valores = None
+    # Retry simples de conexão
     for i in range(3):
         try:
             planilha = cliente.open_by_key(SPREADSHEET_ID)
@@ -135,16 +173,16 @@ def main():
     # --- CONFIGURAÇÃO DE COLUNAS ---
     COL_TRIP    = 'LH Trip Nnumber'
     COL_ETA     = 'ETA Planejado'
-    COL_ORIGEM  = 'station_code'             # Reporte usa o código da estação
-    COL_CHECKIN = 'Checkin'                  # Prioridade 1 para Tempo/Chegada
-    COL_ENTRADA = 'Add to Queue Time'        # Prioridade 2 para Tempo/Chegada
+    COL_ORIGEM  = 'station_code'             # Usa código da estação
+    COL_CHECKIN = 'Checkin'                  # Prioridade 1 para Tempo
+    COL_ENTRADA = 'Add to Queue Time'        # Prioridade 2 para Tempo
     COL_PACOTES = 'SUM de Pending Inbound Parcel Qty'
     COL_STATUS  = 'Status'
     COL_TURNO   = 'Turno'
     COL_DOCA    = 'Doca'
     # --------------------------------
 
-    # 1. Tratamento de Cabeçalhos Duplicados
+    # 1. Tratamento de Cabeçalhos Duplicados (Evita o erro "Truth value of a Series is ambiguous")
     headers_originais = [str(h).strip() for h in valores[0]]
     headers_unicos = []
     seen = {}
@@ -225,26 +263,23 @@ def main():
         doca_val = row.get(COL_DOCA, '--')
         doca_limpa = padronizar_doca(str(doca_val))
 
-        minutos = -999999 # Valor padrão muito baixo para ficar no final se não tiver data
+        minutos = -999999
         if pd.notna(data_referencia):
             # Cálculo de Tempo: Agora (BR) - Chegada (BR)
             minutos = int((agora_br - data_referencia).total_seconds() / 60)
 
         if pd.notna(data_referencia) or status == 'em doca' or 'fila' in status:
-            # Só formata se tiver minutos válidos, senão fica vazio ou --
             tempo_fmt = minutos_para_hhmm(minutos) if minutos != -999999 else "--:--"
             
             linha_msg = f"- {trip} | Doca: {doca_limpa} | ETA: {eta_str} | Chegada: {chegada_str} | Tempo: {tempo_fmt} | {origem}"
             
-            # Armazena Tupla: (MinutosNuméricos, MensagemTexto) para ordenar depois
+            # Tupla: (MinutosNuméricos, TextoFormatado)
             if 'fila' in status:
-                linha_msg = f"- {trip} | ETA: {eta_str} | Chegada: {chegada_str} | Tempo: {tempo_fmt} | {origem}"
                 em_fila.append((minutos, linha_msg))
             elif status == 'em doca':
                 em_doca.append((minutos, linha_msg))
 
     # --- ORDENAÇÃO (Maior tempo primeiro) ---
-    # x[0] é o valor 'minutos'. reverse=True coloca os maiores (mais tempo de espera) no topo.
     em_doca.sort(key=lambda x: x[0], reverse=True)
     em_fila.sort(key=lambda x: x[0], reverse=True)
 
@@ -252,7 +287,6 @@ def main():
 
     if em_doca:
         qtd = len(em_doca)
-        # Pega apenas o texto (item 1 da tupla) para exibir
         texto = "\n".join([x[1] for x in em_doca])
         mensagem.append(f"🚛 Em Doca: {qtd} LT(s)\n{texto}")
 
@@ -279,6 +313,11 @@ def main():
     enviar_webhook(msg_final)
 
 if __name__ == '__main__':
+    # --- TRAVA DE PORTÃO ATIVADA ---
+    # 1. Aguarda XX:00 ou XX:30
+    aguardar_horario_correto()
+    
+    # 2. Executa a lógica principal
     try:
         main()
     except Exception as e:
