@@ -124,85 +124,87 @@ def main():
         enviar_webhook("❌ Falha crítica: Não foi possível ler a planilha após 3 tentativas.")
         return
 
-    # --- TRATAMENTO DE CABEÇALHOS DUPLICADOS ---
-    # Antes de criar o DataFrame, vamos garantir que os nomes sejam únicos
-    headers = [h.strip() for h in valores[0]]
+    # --- TÉCNICA DO SCRIPT ANTIGO + PROTEÇÃO ---
+    # 1. Pega os cabeçalhos brutos
+    headers_originais = [str(h).strip() for h in valores[0]]
+    
+    # 2. Cria cabeçalhos únicos (Status, Status_1, Status_2...)
+    # Isso simula uma planilha "limpa" para o Pandas não travar
+    headers_unicos = []
     seen = {}
-    unique_headers = []
-    for h in headers:
+    for h in headers_originais:
         if h in seen:
             seen[h] += 1
-            unique_headers.append(f"{h}_{seen[h]}") # Ex: Status_1
+            headers_unicos.append(f"{h}_{seen[h]}")
         else:
             seen[h] = 0
-            unique_headers.append(h)
-    
-    # Cria o DataFrame com os cabeçalhos únicos
-    df = pd.DataFrame(valores[1:], columns=unique_headers)
-    print("ℹ️ Cabeçalhos processados e duplicatas renomeadas.")
+            headers_unicos.append(h)
+            
+    # 3. Cria o DataFrame usando esses cabeçalhos seguros
+    df = pd.DataFrame(valores[1:], columns=headers_unicos)
+    print("ℹ️ Planilha carregada e colunas duplicadas tratadas.")
 
-    # Mapeamento seguro (usando os nomes únicos ou originais)
-    # Aqui, a lógica de 'só usar o número' é aplicada acessando o que está na posição correta
+    # --- MAPEAMENTO SEGURO (Baseado no seu script antigo) ---
     try:
-        # Recupera os nomes exatos que ficaram nas posições esperadas
-        # Coluna B (Indice 1)
-        name_eta = unique_headers[1]
-        # Coluna F (Indice 5)
-        name_pacotes = unique_headers[5]
-        # Coluna AC (Indice 28) - Verificando se existe
-        name_origem = unique_headers[28] if len(unique_headers) > 28 else None
+        # Pega os nomes exatos que ficaram nas posições chaves
+        # O script antigo confiava na posição, vamos fazer igual
+        nome_col_eta = headers_unicos[1]    # Coluna B (índice 1)
+        nome_col_pacotes = headers_unicos[5] # Coluna F (índice 5)
+        
+        # Renomeia para um padrão interno nosso para facilitar
+        df.rename(columns={
+            nome_col_eta: 'ETA Planejado',
+            nome_col_pacotes: 'Pacotes'
+        }, inplace=True)
+
+        # Procura coluna Origem (AC - índice 28) se existir
+        if len(headers_unicos) > 28:
+            nome_col_origem = headers_unicos[28]
+            df.rename(columns={nome_col_origem: 'Origem'}, inplace=True)
     except IndexError:
-        print("❌ Erro: Planilha com menos colunas do que o esperado.")
+        print("❌ A planilha mudou de tamanho e não tem as colunas esperadas.")
         return
 
-    # Renomeia para padronizar o uso no script
-    rename_map = {
-        name_eta: 'ETA Planejado',
-        name_pacotes: 'Pacotes'
-    }
-    if name_origem:
-        rename_map[name_origem] = 'Origem'
-        
-    df.rename(columns=rename_map, inplace=True)
-    
-    # Tratamento de Strings
-    # Verifica se as colunas existem antes de tentar converter
-    for col in ['LH Trip Nnumber', 'Satus 2.0', 'Doca', 'Turno 2']:
+    # Limpeza de Strings nas colunas que vamos usar
+    cols_para_limpar = ['LH Trip Nnumber', 'Satus 2.0', 'Doca', 'Turno 2']
+    for col in cols_para_limpar:
+        # Procura se a coluna existe (ou se virou Satus 2.0_1, etc)
+        col_existente = None
         if col in df.columns:
-            df[col] = df[col].astype(str).str.strip()
+            col_existente = col
         else:
-            # Tenta achar variação com sufixo (ex: Satus 2.0_1)
-            found = False
+            # Tenta achar a variação renomeada
             for c in df.columns:
                 if c.startswith(col):
-                    df.rename(columns={c: col}, inplace=True)
-                    df[col] = df[col].astype(str).str.strip()
-                    found = True
+                    col_existente = c
                     break
-            if not found:
-                print(f"⚠️ Aviso: Coluna '{col}' não encontrada (nem duplicada).")
+        
+        if col_existente:
+            # Normaliza o nome para o script usar sempre o nome padrão
+            if col_existente != col:
+                df.rename(columns={col_existente: col}, inplace=True)
+            df[col] = df[col].astype(str).str.strip()
 
-    # --- LÓGICA DE DATAS DE CHEGADA (PELO NÚMERO DA COLUNA) ---
+    # --- DATAS (USANDO NÚMERO DA COLUNA COMO VOCÊ PEDIU) ---
     print("ℹ️ Processando datas de Chegada (Colunas D e G)...")
-    # Coluna D = Índice 3 | Coluna G = Índice 6
-    # Acessa diretamente pelo número (iloc), ignorando totalmente o nome
-    col_d_convertida = pd.to_datetime(df.iloc[:, 3], dayfirst=True, errors='coerce')
-    col_g_convertida = pd.to_datetime(df.iloc[:, 6], dayfirst=True, errors='coerce')
     
-    df['Chegada LT'] = col_d_convertida.combine_first(col_g_convertida)
-    # -----------------------------------------------------------
-
-    # Outras conversões de Data
+    # Acessa diretamente pelo número da coluna (iloc), ignorando nomes repetidos
+    # Coluna D = Índice 3 | Coluna G = Índice 6
+    col_d = pd.to_datetime(df.iloc[:, 3], dayfirst=True, errors='coerce')
+    col_g = pd.to_datetime(df.iloc[:, 6], dayfirst=True, errors='coerce')
+    
+    df['Chegada LT'] = col_d.combine_first(col_g)
+    
+    # Outras datas
     if 'Add to Queue Time' in df.columns:
         df['Add to Queue Time'] = pd.to_datetime(df['Add to Queue Time'], dayfirst=True, errors='coerce')
-    
     df['ETA Planejado'] = pd.to_datetime(df['ETA Planejado'], dayfirst=True, errors='coerce')
     df['Pacotes'] = pd.to_numeric(df['Pacotes'], errors='coerce').fillna(0).astype(int)
 
-    # Filtros
+    # --- LÓGICA DE FILTROS ---
     if 'Satus 2.0' in df.columns:
         df['Satus 2.0'] = df['Satus 2.0'].replace({'Pendente Recepção': 'pendente recepção', 'Pendente De Chegada': 'pendente de chegada'})
-        # Filtro finalizado
+        # Aqui era onde o erro acontecia. Agora com colunas únicas, não acontece mais.
         df = df[~df['Satus 2.0'].fillna('').str.lower().str.contains('finalizado')]
 
     agora_utc = datetime.utcnow().replace(second=0, microsecond=0)
@@ -212,26 +214,28 @@ def main():
     pendentes_status = ['pendente de chegada', 'pendente recepção']
 
     for _, row in df.iterrows():
-        # Verifica existência das colunas antes de ler
-        trip = row['LH Trip Nnumber'] if 'LH Trip Nnumber' in df.columns else '???'
-        status = str(row['Satus 2.0']).strip().lower() if 'Satus 2.0' in df.columns else ''
-        origem = row['Origem'] if 'Origem' in df.columns and pd.notna(row['Origem']) and str(row['Origem']).strip() != '' else '--'
+        # Usa .get para segurança caso alguma coluna tenha sumido
+        trip = row.get('LH Trip Nnumber', '???')
+        status = str(row.get('Satus 2.0', '')).strip().lower()
+        origem = row.get('Origem', '--')
+        if pd.isna(origem) or str(origem).strip() == '': origem = '--'
         
         # Logica Pendentes
-        if status in pendentes_status and pd.notna(row['ETA Planejado']) and inicio_dia <= row['ETA Planejado'] <= fim_dia:
-            t = row['Turno 2'] if 'Turno 2' in df.columns else 'Indef'
+        eta = row.get('ETA Planejado')
+        if status in pendentes_status and pd.notna(eta) and inicio_dia <= eta <= fim_dia:
+            t = row.get('Turno 2', 'Indef')
             if t not in pendentes_por_turno: pendentes_por_turno[t] = {'lts': 0, 'pacotes': 0}
             pendentes_por_turno[t]['lts'] += 1
-            pendentes_por_turno[t]['pacotes'] += row['Pacotes']
+            pendentes_por_turno[t]['pacotes'] += row.get('Pacotes', 0)
 
         # Logica Doca/Fila
-        entrada = row['Add to Queue Time'] if 'Add to Queue Time' in df.columns else pd.NaT
-        eta_str = row['ETA Planejado'].strftime('%d/%m %H:%M') if pd.notna(row['ETA Planejado']) else '--/-- --:--'
+        entrada = row.get('Add to Queue Time')
+        eta_str = eta.strftime('%d/%m %H:%M') if pd.notna(eta) else '--/-- --:--'
         
-        chegada_val = row['Chegada LT']
+        chegada_val = row.get('Chegada LT')
         chegada_str = chegada_val.strftime('%d/%m %H:%M') if pd.notna(chegada_val) else '--/-- --:--'
         
-        doca_val = row['Doca'] if 'Doca' in df.columns else '--'
+        doca_val = row.get('Doca', '--')
         doca_limpa = padronizar_doca(str(doca_val))
 
         minutos = None
