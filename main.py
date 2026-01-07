@@ -15,6 +15,38 @@ SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 SPREADSHEET_ID = '1TfzqJZFD3yPNCAXAiLyEw876qjOlitae0pP9TTqNCPI'
 NOME_ABA = 'Tabela dinâmica 2'
 
+# --- FUNÇÃO DE ESPERA ("O PORTÃO") ---
+def aguardar_horario_correto():
+    """
+    Verifica se é hora cheia (XX:00) ou meia hora (XX:30).
+    Se não for, aguarda até o próximo intervalo.
+    """
+    print(f"Iniciando verificação de horário às {datetime.utcnow().strftime('%H:%M:%S')} (Fuso UTC do Servidor)")
+    
+    while True:
+        agora_utc = datetime.utcnow()
+        minutos_atuais = agora_utc.minute
+        
+        # Verifica se é hora cheia (00) ou meia hora (30)
+        if minutos_atuais == 0 or minutos_atuais == 30:
+            print(f"✅ 'Portão' aberto: {agora_utc.strftime('%H:%M:%S')} UTC")
+            print("Iniciando coleta de dados...")
+            break 
+        else:
+            if minutos_atuais < 30:
+                minutos_faltando = 30 - minutos_atuais
+                proximo_horario_str = f"{agora_utc.hour:02d}:30"
+            else:
+                minutos_faltando = 60 - minutos_atuais
+                proxima_hora = (agora_utc.hour + 1) % 24
+                proximo_horario_str = f"{proxima_hora:02d}:00"
+            
+            segundos_para_o_proximo_check = 30 - (agora_utc.second % 30)
+            print(f"⏳ Horário atual: {agora_utc.strftime('%H:%M:%S')} UTC")
+            print(f"   Aguardando o 'portão' abrir às {proximo_horario_str} (faltam ~{minutos_faltando} min)")
+            
+            time.sleep(segundos_para_o_proximo_check)
+
 # --- Função de Autenticação ---
 def autenticar_e_criar_cliente():
     creds_raw = os.environ.get('GCP_SA_KEY_JSON', '').strip()
@@ -35,31 +67,36 @@ def autenticar_e_criar_cliente():
         print(f"❌ Erro ao autenticar: {e}")
         return None
 
-# --- Função de Webhook (COM PAGINAÇÃO) ---
+# --- Função de Webhook ---
 def enviar_webhook(mensagem_txt):
     webhook_url = os.environ.get('SEATALK_WEBHOOK_URL') 
     if not webhook_url:
         print("❌ Erro: Variável 'SEATALK_WEBHOOK_URL' não definida.")
         return
     
-    # Limite de segurança do Seatalk (aprox 4096)
-    limite = 3800 
+    # --- MUDANÇA AQUI: LIMITE ALTERADO PARA 4000 ---
+    LIMITE_SEGURO = 4000 
     partes = []
     
-    if len(mensagem_txt) > limite:
-        print(f"⚠️ Mensagem longa ({len(mensagem_txt)} chars). Dividindo em partes...")
+    # 1. Só divide se for estritamente necessário
+    if len(mensagem_txt) > LIMITE_SEGURO:
+        print(f"⚠️ Mensagem excedeu {LIMITE_SEGURO} chars. Dividindo em partes...")
         while len(mensagem_txt) > 0:
-            if len(mensagem_txt) > limite:
-                corte = mensagem_txt.rfind('\n', 0, limite)
-                if corte == -1: corte = limite
+            if len(mensagem_txt) > LIMITE_SEGURO:
+                # Procura a última quebra de linha antes do limite
+                corte = mensagem_txt.rfind('\n', 0, LIMITE_SEGURO)
+                if corte == -1: corte = LIMITE_SEGURO 
+                
                 partes.append(mensagem_txt[:corte])
                 mensagem_txt = mensagem_txt[corte:] 
             else:
                 partes.append(mensagem_txt)
                 break
     else:
+        # Manda inteiro
         partes.append(mensagem_txt)
 
+    # 2. Envio
     for i, parte in enumerate(partes):
         print(f"📤 Enviando parte {i+1}/{len(partes)}...")
         try:
@@ -221,9 +258,7 @@ def main():
         if pd.notna(data_referencia) or status == 'em doca' or 'fila' in status:
             tempo_fmt = minutos_para_hhmm(minutos) if minutos != -999999 else "--:--"
             
-            # --- TABELA RESTAURADA (COM ESPAÇOS, DOCA COMPACTA, ORIGEM ALINHADA) ---
-            # Trip:13 | Doca:4 | ETA:11 | Cheg:11 | Tempo:6 | Origem: Livre
-            # Adicionado " | " como separador
+            # --- TABELA RESTAURADA ---
             linha_tabela = f"{trip:^13} | {doca_limpa:^4} | {eta_str:^11} | {chegada_str:^11} | {tempo_fmt:^6} | {origem}"
             
             if 'fila' in status:
@@ -237,7 +272,7 @@ def main():
 
     mensagem = []
     
-    # Cabeçalho Restaurado (Origem Alinhada à Esquerda)
+    # Cabeçalho
     header_tabela = f"{'LT':^13} | {'Doca':^4} | {'ETA':^11} | {'Chegada':^11} | {'Tempo':^6} | Origem"
 
     if em_doca:
@@ -264,10 +299,12 @@ def main():
         return
 
     msg_final = "Segue as LH´s com mais tempo de Pátio:\n\n" + "\n\n".join(mensagem)
-    print("📤 Enviando mensagem (com paginação)...")
+    print("📤 Enviando mensagem...")
     enviar_webhook(msg_final)
 
 if __name__ == '__main__':
+    aguardar_horario_correto()
+    
     try:
         main()
     except Exception as e:
