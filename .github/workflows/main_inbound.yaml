@@ -22,7 +22,7 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
       - name: Criar arquivo de credenciais
-        run: echo '${{ secrets.GCP_SA_KEY_JSON }}' > service_account.json
+        run: echo '${{ secrets.GCP_SA_KEY_JSON }}' | base64 -d > service_account.json
 
       - name: Executar o script
         env:
