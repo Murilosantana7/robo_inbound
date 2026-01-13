@@ -74,7 +74,6 @@ def enviar_webhook(mensagem_txt):
         print("❌ Erro: Variável 'SEATALK_WEBHOOK_URL' não definida.")
         return
     
-    # --- MUDANÇA AQUI: LIMITE ALTERADO PARA 4000 ---
     LIMITE_SEGURO = 4000 
     partes = []
     
@@ -124,28 +123,6 @@ def minutos_para_hhmm(minutos):
     mins = m % 60
     return f"{sinal}{horas:02d}:{mins:02d}"
 
-def turno_atual(agora_br):
-    hora_time = agora_br.time()
-    if hora_time >= dt_time(6, 0) and hora_time < dt_time(14, 0): return "T1"
-    elif hora_time >= dt_time(14, 0) and hora_time < dt_time(22, 0): return "T2"
-    else: return "T3"
-
-def ordenar_turnos(pendentes_por_turno, agora_br):
-    ordem_turnos = ['T1', 'T2', 'T3']
-    t_atual = turno_atual(agora_br)
-    idx = ordem_turnos.index(t_atual)
-    nova_ordem = ordem_turnos[idx:] + ordem_turnos[:idx]
-    turnos_existentes = {k: v for k, v in pendentes_por_turno.items() if k in nova_ordem}
-    return sorted(turnos_existentes.items(), key=lambda x: nova_ordem.index(x[0]))
-
-def periodo_dia_customizado(agora_br):
-    hoje = agora_br.date()
-    inicio_dia = datetime.combine(hoje, dt_time(6, 0))
-    if agora_br < inicio_dia:
-        inicio_dia -= timedelta(days=1)
-    fim_dia = inicio_dia + timedelta(days=1) - timedelta(seconds=1)
-    return inicio_dia, fim_dia
-
 def padronizar_doca(doca_str):
     match = re.search(r'(\d+)$', doca_str)
     return match.group(1) if match else "--"
@@ -187,6 +164,7 @@ def main():
     COL_STATUS  = 'Status'
     COL_TURNO   = 'Turno'
     COL_DOCA    = 'Doca'
+    COL_CUTOFF  = 'Cutoff' # Mapeamento da Coluna O
 
     headers_originais = [str(h).strip() for h in valores[0]]
     headers_unicos = []
@@ -214,6 +192,10 @@ def main():
 
     if COL_ETA in df.columns:
         df[COL_ETA] = pd.to_datetime(df[COL_ETA], dayfirst=True, errors='coerce')
+
+    # Nova conversão da Coluna Cutoff
+    if COL_CUTOFF in df.columns:
+        df[COL_CUTOFF] = pd.to_datetime(df[COL_CUTOFF], dayfirst=True, errors='coerce')
     
     if COL_PACOTES in df.columns:
         df[COL_PACOTES] = pd.to_numeric(df[COL_PACOTES], errors='coerce').fillna(0).astype(int)
@@ -223,9 +205,34 @@ def main():
         df[COL_STATUS] = df[COL_STATUS].replace({'Pendente Recepção': 'pendente recepção', 'Pendente De Chegada': 'pendente de chegada'})
         df = df[~df[COL_STATUS].fillna('').str.lower().str.contains('finalizado')]
 
-    inicio_dia, fim_dia = periodo_dia_customizado(agora_br)
+    # --- LÓGICA DE DATAS E TURNOS ---
     
-    em_doca, em_fila, pendentes_por_turno = [], [], {}
+    # Define o "Hoje" Operacional (Se for antes das 06:00, conta como dia anterior)
+    if agora_br.time() < dt_time(6, 0):
+        op_date_hoje = agora_br.date() - timedelta(days=1)
+    else:
+        op_date_hoje = agora_br.date()
+
+    op_date_amanha = op_date_hoje + timedelta(days=1)
+    
+    # Define o Turno Atual para comparação de atraso
+    hora_atual = agora_br.time()
+    turno_atual_str = "T3" # Default (madrugada/noite)
+    if dt_time(6, 0) <= hora_atual < dt_time(14, 0):
+        turno_atual_str = "T1"
+    elif dt_time(14, 0) <= hora_atual < dt_time(22, 0):
+        turno_atual_str = "T2"
+        
+    mapa_turnos = {'T1': 1, 'T2': 2, 'T3': 3}
+    peso_turno_atual = mapa_turnos.get(turno_atual_str, 0)
+    
+    em_doca, em_fila = [], []
+    resumo = {
+        'atrasado': {},
+        'hoje': {},
+        'amanha': {}
+    }
+    
     pendentes_status = ['pendente de chegada', 'pendente recepção']
 
     for _, row in df.iterrows():
@@ -235,12 +242,47 @@ def main():
         if not origem: origem = "--"
         
         eta = row.get(COL_ETA)
-        if status in pendentes_status and pd.notna(eta) and inicio_dia <= eta <= fim_dia:
+        cutoff = row.get(COL_CUTOFF)
+        
+        # --- LÓGICA DE CLASSIFICAÇÃO (Atrasado / Hoje / Amanhã) ---
+        if status in pendentes_status:
             t = str(row.get(COL_TURNO, 'Indef')).strip()
-            if t not in pendentes_por_turno: pendentes_por_turno[t] = {'lts': 0, 'pacotes': 0}
-            pendentes_por_turno[t]['lts'] += 1
-            pendentes_por_turno[t]['pacotes'] += row.get(COL_PACOTES, 0)
+            qtd_pacotes = row.get(COL_PACOTES, 0)
+            
+            categoria = None
+            
+            if pd.notna(cutoff):
+                d_cutoff = cutoff.date()
+                
+                if d_cutoff < op_date_hoje:
+                    # Data anterior a hoje operacional -> Atrasado
+                    categoria = 'atrasado'
+                    
+                elif d_cutoff == op_date_hoje:
+                    # Data é hoje -> Verifica o Turno
+                    peso_turno_row = mapa_turnos.get(t, 99) 
+                    
+                    if peso_turno_row < peso_turno_atual:
+                        # Se o turno da carga já passou hoje -> Atrasado
+                        categoria = 'atrasado' 
+                    else:
+                        # Se o turno é o atual ou futuro de hoje -> Hoje
+                        categoria = 'hoje'     
+                        
+                elif d_cutoff == op_date_amanha:
+                    # É do dia seguinte
+                    categoria = 'amanha'
+            else:
+                # Se não tem data, assume Hoje (ou ajuste conforme necessidade)
+                categoria = 'hoje' 
+            
+            if categoria:
+                if t not in resumo[categoria]: 
+                    resumo[categoria][t] = {'lts': 0, 'pacotes': 0}
+                resumo[categoria][t]['lts'] += 1
+                resumo[categoria][t]['pacotes'] += qtd_pacotes
 
+        # --- LÓGICA EM DOCA / EM FILA ---
         val_checkin = row.get(COL_CHECKIN)
         val_entrada = row.get(COL_ENTRADA)
         data_referencia = val_checkin if pd.notna(val_checkin) else val_entrada
@@ -257,8 +299,6 @@ def main():
 
         if pd.notna(data_referencia) or status == 'em doca' or 'fila' in status:
             tempo_fmt = minutos_para_hhmm(minutos) if minutos != -999999 else "--:--"
-            
-            # --- TABELA RESTAURADA ---
             linha_tabela = f"{trip:^13} | {doca_limpa:^4} | {eta_str:^11} | {chegada_str:^11} | {tempo_fmt:^6} | {origem}"
             
             if 'fila' in status:
@@ -266,13 +306,11 @@ def main():
             elif status == 'em doca':
                 em_doca.append((minutos, linha_tabela))
 
-    # --- ORDENAÇÃO ---
+    # --- MONTAGEM DA MENSAGEM ---
     em_doca.sort(key=lambda x: x[0], reverse=True)
     em_fila.sort(key=lambda x: x[0], reverse=True)
 
     mensagem = []
-    
-    # Cabeçalho
     header_tabela = f"{'LT':^13} | {'Doca':^4} | {'ETA':^11} | {'Chegada':^11} | {'Tempo':^6} | Origem"
 
     if em_doca:
@@ -285,14 +323,33 @@ def main():
         texto = "\n".join([x[1] for x in em_fila])
         mensagem.append(f"🔴 Em Fila: {qtd} LT(s)\n{header_tabela}\n{texto}")
 
-    total_pend = sum(d['lts'] for d in pendentes_por_turno.values())
-    if total_pend > 0:
-        pcts = sum(d['pacotes'] for d in pendentes_por_turno.values())
-        mensagem.append(f"⏳ Pendentes: {total_pend} LTs ({pcts} pct)")
-        for t, d in ordenar_turnos(pendentes_por_turno, agora_br):
-            mensagem.append(f"- {d['lts']} LTs no {t}")
-    elif not em_doca and not em_fila:
-        mensagem.append("✅ Nenhuma pendência.")
+    str_amanha = op_date_amanha.strftime('%d/%m/%Y')
+    
+    # Títulos simplificados
+    titulos = {
+        'atrasado': '⚠️ Atrasados',
+        'hoje': '📅 Hoje',
+        'amanha': f'🌅 Amanhã {str_amanha}'
+    }
+    
+    ordem_turnos = ['T1', 'T2', 'T3']
+    ordem_exibicao = ['atrasado', 'hoje', 'amanha']
+
+    for cat in ordem_exibicao:
+        dados_cat = resumo[cat]
+        if dados_cat:
+            total_cat = sum(d['lts'] for d in dados_cat.values())
+            pcts_cat = sum(d['pacotes'] for d in dados_cat.values())
+            
+            bloco = [f"{titulos[cat]}: {total_cat} LTs ({pcts_cat} pct)"]
+            
+            # Ordena os turnos T1, T2, T3
+            turnos_ordenados = sorted(dados_cat.items(), key=lambda x: ordem_turnos.index(x[0]) if x[0] in ordem_turnos else 99)
+            
+            for t, d in turnos_ordenados:
+                bloco.append(f"   - {t}: {d['lts']} LTs ({d['pacotes']} pct)")
+            
+            mensagem.append("\n".join(bloco))
 
     if not mensagem:
         print("ℹ️ Nada a enviar.")
