@@ -158,13 +158,13 @@ def main():
     COL_TRIP    = 'LH Trip Nnumber'
     COL_ETA     = 'ETA Planejado'
     COL_ORIGEM  = 'station_code'
-    COL_CHECKIN = 'Checkin'
+    COL_CHECKIN = 'Checkin' # Coluna D
     COL_ENTRADA = 'Add to Queue Time'
     COL_PACOTES = 'SUM de Pending Inbound Parcel Qty'
     COL_STATUS  = 'Status'
     COL_TURNO   = 'Turno'
     COL_DOCA    = 'Doca'
-    COL_CUTOFF  = 'Cutoff' # Mapeamento da Coluna O
+    COL_CUTOFF  = 'Cutoff' # Coluna O
 
     headers_originais = [str(h).strip() for h in valores[0]]
     headers_unicos = []
@@ -193,7 +193,6 @@ def main():
     if COL_ETA in df.columns:
         df[COL_ETA] = pd.to_datetime(df[COL_ETA], dayfirst=True, errors='coerce')
 
-    # Nova conversão da Coluna Cutoff
     if COL_CUTOFF in df.columns:
         df[COL_CUTOFF] = pd.to_datetime(df[COL_CUTOFF], dayfirst=True, errors='coerce')
     
@@ -206,8 +205,6 @@ def main():
         df = df[~df[COL_STATUS].fillna('').str.lower().str.contains('finalizado')]
 
     # --- LÓGICA DE DATAS E TURNOS ---
-    
-    # Define o "Hoje" Operacional (Se for antes das 06:00, conta como dia anterior)
     if agora_br.time() < dt_time(6, 0):
         op_date_hoje = agora_br.date() - timedelta(days=1)
     else:
@@ -215,9 +212,8 @@ def main():
 
     op_date_amanha = op_date_hoje + timedelta(days=1)
     
-    # Define o Turno Atual para comparação de atraso
     hora_atual = agora_br.time()
-    turno_atual_str = "T3" # Default (madrugada/noite)
+    turno_atual_str = "T3" # Default
     if dt_time(6, 0) <= hora_atual < dt_time(14, 0):
         turno_atual_str = "T1"
     elif dt_time(14, 0) <= hora_atual < dt_time(22, 0):
@@ -243,8 +239,16 @@ def main():
         
         eta = row.get(COL_ETA)
         cutoff = row.get(COL_CUTOFF)
+        val_checkin = row.get(COL_CHECKIN)
         
-        # --- LÓGICA DE CLASSIFICAÇÃO (Atrasado / Hoje / Amanhã) ---
+        # --- [NOVO] FILTRO DE LIMPEZA ---
+        # Se data do Cutoff for anterior a hoje E Checkin estiver vazio -> Ignora (não conta como atrasado)
+        if pd.notna(cutoff):
+            d_cutoff = cutoff.date()
+            if d_cutoff < op_date_hoje and pd.isna(val_checkin):
+                continue # Pula para a próxima linha
+        
+        # --- LÓGICA DE CLASSIFICAÇÃO ---
         if status in pendentes_status:
             t = str(row.get(COL_TURNO, 'Indef')).strip()
             qtd_pacotes = row.get(COL_PACOTES, 0)
@@ -255,25 +259,20 @@ def main():
                 d_cutoff = cutoff.date()
                 
                 if d_cutoff < op_date_hoje:
-                    # Data anterior a hoje operacional -> Atrasado
+                    # Data anterior a hoje (e tem checkin, senão teria caído no filtro acima)
                     categoria = 'atrasado'
                     
                 elif d_cutoff == op_date_hoje:
-                    # Data é hoje -> Verifica o Turno
                     peso_turno_row = mapa_turnos.get(t, 99) 
                     
                     if peso_turno_row < peso_turno_atual:
-                        # Se o turno da carga já passou hoje -> Atrasado
-                        categoria = 'atrasado' 
+                        categoria = 'atrasado' # Atraso Intradia
                     else:
-                        # Se o turno é o atual ou futuro de hoje -> Hoje
                         categoria = 'hoje'     
                         
                 elif d_cutoff == op_date_amanha:
-                    # É do dia seguinte
                     categoria = 'amanha'
             else:
-                # Se não tem data, assume Hoje (ou ajuste conforme necessidade)
                 categoria = 'hoje' 
             
             if categoria:
@@ -283,7 +282,6 @@ def main():
                 resumo[categoria][t]['pacotes'] += qtd_pacotes
 
         # --- LÓGICA EM DOCA / EM FILA ---
-        val_checkin = row.get(COL_CHECKIN)
         val_entrada = row.get(COL_ENTRADA)
         data_referencia = val_checkin if pd.notna(val_checkin) else val_entrada
         
@@ -325,7 +323,6 @@ def main():
 
     str_amanha = op_date_amanha.strftime('%d/%m/%Y')
     
-    # Títulos simplificados
     titulos = {
         'atrasado': '⚠️ Atrasados',
         'hoje': '📅 Hoje',
@@ -343,7 +340,6 @@ def main():
             
             bloco = [f"{titulos[cat]}: {total_cat} LTs ({pcts_cat} pct)"]
             
-            # Ordena os turnos T1, T2, T3
             turnos_ordenados = sorted(dados_cat.items(), key=lambda x: ordem_turnos.index(x[0]) if x[0] in ordem_turnos else 99)
             
             for t, d in turnos_ordenados:
