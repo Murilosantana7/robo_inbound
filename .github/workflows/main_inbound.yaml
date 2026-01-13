@@ -21,11 +21,8 @@ jobs:
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      - name: Criar arquivo de credenciais
-        run: echo '${{ secrets.GCP_SA_KEY_JSON }}' | base64 -d > service_account.json
-
       - name: Executar o script
         env:
-          GOOGLE_APPLICATION_CREDENTIALS: service_account.json
+          GCP_SA_KEY_JSON: ${{ secrets.GCP_SA_KEY_JSON }}
           SEATALK_WEBHOOK_URL: ${{ secrets.SEATALK_WEBHOOK_URL }}
         run: python main.py
