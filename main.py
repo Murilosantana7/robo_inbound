@@ -158,13 +158,16 @@ def main():
     COL_TRIP    = 'LH Trip Nnumber'
     COL_ETA     = 'ETA Planejado'
     COL_ORIGEM  = 'station_code'
-    COL_CHECKIN = 'Checkin' # Coluna D
+    COL_CHECKIN = 'Checkin'
     COL_ENTRADA = 'Add to Queue Time'
-    COL_PACOTES = 'SUM de Pending Inbound Parcel Qty'
+    
+    # --- CORREÇÃO: ALTERADO PARA COLUNA F ---
+    COL_PACOTES = 'SUM de total_orders' 
+    
     COL_STATUS  = 'Status'
     COL_TURNO   = 'Turno'
     COL_DOCA    = 'Doca'
-    COL_CUTOFF  = 'Cutoff' # Coluna O
+    COL_CUTOFF  = 'Cutoff'
 
     headers_originais = [str(h).strip() for h in valores[0]]
     headers_unicos = []
@@ -241,12 +244,11 @@ def main():
         cutoff = row.get(COL_CUTOFF)
         val_checkin = row.get(COL_CHECKIN)
         
-        # --- [NOVO] FILTRO DE LIMPEZA ---
-        # Se data do Cutoff for anterior a hoje E Checkin estiver vazio -> Ignora (não conta como atrasado)
+        # --- FILTRO DE LIMPEZA (SEM FANTASMAS) ---
         if pd.notna(cutoff):
             d_cutoff = cutoff.date()
             if d_cutoff < op_date_hoje and pd.isna(val_checkin):
-                continue # Pula para a próxima linha
+                continue 
         
         # --- LÓGICA DE CLASSIFICAÇÃO ---
         if status in pendentes_status:
@@ -259,14 +261,13 @@ def main():
                 d_cutoff = cutoff.date()
                 
                 if d_cutoff < op_date_hoje:
-                    # Data anterior a hoje (e tem checkin, senão teria caído no filtro acima)
                     categoria = 'atrasado'
                     
                 elif d_cutoff == op_date_hoje:
                     peso_turno_row = mapa_turnos.get(t, 99) 
                     
                     if peso_turno_row < peso_turno_atual:
-                        categoria = 'atrasado' # Atraso Intradia
+                        categoria = 'atrasado'
                     else:
                         categoria = 'hoje'     
                         
