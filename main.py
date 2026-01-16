@@ -15,38 +15,6 @@ SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 SPREADSHEET_ID = '1TfzqJZFD3yPNCAXAiLyEw876qjOlitae0pP9TTqNCPI'
 NOME_ABA = 'Tabela dinâmica 2'
 
-# --- FUNÇÃO DE ESPERA ("O PORTÃO") ---
-def aguardar_horario_correto():
-    """
-    Verifica se é hora cheia (XX:00) ou meia hora (XX:30).
-    Se não for, aguarda até o próximo intervalo.
-    """
-    print(f"Iniciando verificação de horário às {datetime.utcnow().strftime('%H:%M:%S')} (Fuso UTC do Servidor)")
-    
-    while True:
-        agora_utc = datetime.utcnow()
-        minutos_atuais = agora_utc.minute
-        
-        # Verifica se é hora cheia (00) ou meia hora (30)
-        if minutos_atuais == 0 or minutos_atuais == 30:
-            print(f"✅ 'Portão' aberto: {agora_utc.strftime('%H:%M:%S')} UTC")
-            print("Iniciando coleta de dados...")
-            break 
-        else:
-            if minutos_atuais < 30:
-                minutos_faltando = 30 - minutos_atuais
-                proximo_horario_str = f"{agora_utc.hour:02d}:30"
-            else:
-                minutos_faltando = 60 - minutos_atuais
-                proxima_hora = (agora_utc.hour + 1) % 24
-                proximo_horario_str = f"{proxima_hora:02d}:00"
-            
-            segundos_para_o_proximo_check = 30 - (agora_utc.second % 30)
-            print(f"⏳ Horário atual: {agora_utc.strftime('%H:%M:%S')} UTC")
-            print(f"   Aguardando o 'portão' abrir às {proximo_horario_str} (faltam ~{minutos_faltando} min)")
-            
-            time.sleep(segundos_para_o_proximo_check)
-
 # --- Função de Autenticação ---
 def autenticar_e_criar_cliente():
     creds_raw = os.environ.get('GCP_SA_KEY_JSON', '').strip()
@@ -54,10 +22,12 @@ def autenticar_e_criar_cliente():
         print("❌ Erro: Variável 'GCP_SA_KEY_JSON' vazia.")
         return None
     try:
+        # Tenta decodificar se estiver em Base64
         decoded_bytes = base64.b64decode(creds_raw, validate=True)
         creds_json_str = decoded_bytes.decode('utf-8')
         print("ℹ️ Credencial detectada como Base64 e decodificada.")
     except (binascii.Error, ValueError):
+        # Se falhar, assume que já é o JSON puro
         creds_json_str = creds_raw
 
     try:
@@ -131,6 +101,7 @@ def padronizar_doca(doca_str):
 def main():
     print(f"🔄 Script 'main' iniciado.")
     
+    # Define Horário Brasil (UTC-3)
     agora_br = datetime.utcnow() - timedelta(hours=3)
     agora_br = agora_br.replace(second=0, microsecond=0)
     print(f"🕒 Horário de Referência (Brasília): {agora_br}")
@@ -161,7 +132,7 @@ def main():
     COL_CHECKIN = 'Checkin'
     COL_ENTRADA = 'Add to Queue Time'
     
-    # --- CORREÇÃO: ALTERADO PARA COLUNA F ---
+    # Atenção: Nome exato da coluna na dinâmica
     COL_PACOTES = 'SUM de total_orders' 
     
     COL_STATUS  = 'Status'
@@ -169,6 +140,7 @@ def main():
     COL_DOCA    = 'Doca'
     COL_CUTOFF  = 'Cutoff'
 
+    # Tratamento de headers duplicados
     headers_originais = [str(h).strip() for h in valores[0]]
     headers_unicos = []
     seen = {}
@@ -183,9 +155,11 @@ def main():
     df = pd.DataFrame(valores[1:], columns=headers_unicos)
     
     print("ℹ️ Convertendo colunas de data...")
+    # Conversões e limpezas
     if COL_CHECKIN in df.columns:
         df[COL_CHECKIN] = pd.to_datetime(df[COL_CHECKIN], dayfirst=True, errors='coerce')
     else:
+        # Fallback por índice (Cuidado se a coluna mudar de lugar)
         if len(df.columns) > 3: df[COL_CHECKIN] = pd.to_datetime(df.iloc[:, 3], dayfirst=True, errors='coerce')
 
     if COL_ENTRADA in df.columns:
@@ -208,6 +182,7 @@ def main():
         df = df[~df[COL_STATUS].fillna('').str.lower().str.contains('finalizado')]
 
     # --- LÓGICA DE DATAS E TURNOS ---
+    # Define data operacional (se antes das 06:00, conta como dia anterior)
     if agora_br.time() < dt_time(6, 0):
         op_date_hoje = agora_br.date() - timedelta(days=1)
     else:
@@ -243,17 +218,22 @@ def main():
         eta = row.get(COL_ETA)
         cutoff = row.get(COL_CUTOFF)
         val_checkin = row.get(COL_CHECKIN)
-        
-        # --- FILTRO DE LIMPEZA (SEM FANTASMAS) ---
+        qtd_pacotes = row.get(COL_PACOTES, 0)
+
+        # --- FILTRO 1: REMOVE VAZIOS (NOVA REGRA) ---
+        # Se a quantidade de pacotes for 0 ou negativa, ignora totalmente
+        if qtd_pacotes <= 0:
+            continue
+
+        # --- FILTRO 2: LIMPEZA DE ANTIGOS SEM CHECKIN ---
         if pd.notna(cutoff):
             d_cutoff = cutoff.date()
             if d_cutoff < op_date_hoje and pd.isna(val_checkin):
                 continue 
         
-        # --- LÓGICA DE CLASSIFICAÇÃO ---
+        # --- LÓGICA DE CLASSIFICAÇÃO (Atrasado/Hoje/Amanhã) ---
         if status in pendentes_status:
             t = str(row.get(COL_TURNO, 'Indef')).strip()
-            qtd_pacotes = row.get(COL_PACOTES, 0)
             
             categoria = None
             
@@ -269,7 +249,7 @@ def main():
                     if peso_turno_row < peso_turno_atual:
                         categoria = 'atrasado'
                     else:
-                        categoria = 'hoje'     
+                        categoria = 'hoje'      
                         
                 elif d_cutoff == op_date_amanha:
                     categoria = 'amanha'
@@ -357,7 +337,7 @@ def main():
     enviar_webhook(msg_final)
 
 if __name__ == '__main__':
-    aguardar_horario_correto()
+    # A função 'aguardar_horario_correto' foi removida para otimização
     
     try:
         main()
