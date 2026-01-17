@@ -25,8 +25,7 @@ def autenticar_e_criar_cliente():
 
 def enviar_webhook(mensagem_txt):
     """
-    Tenta enviar a mensagem no formato de bloco de código. 
-    Retorna True para sucesso e False para erro (ex: excesso de caracteres).
+    Tenta enviar a mensagem. Retorna True se sucesso, False se falhar (ex: muito longa).
     """
     webhook_url = os.environ.get('SEATALK_WEBHOOK_URL') 
     if not webhook_url: return False
@@ -40,7 +39,6 @@ def enviar_webhook(mensagem_txt):
             }
         }
         response = requests.post(webhook_url, json=payload)
-        # O SeaTalk costuma retornar erro 400 ou 413 quando a mensagem excede o limite
         return response.status_code == 200
     except Exception as e:
         print(f"Erro na requisição: {e}")
@@ -61,22 +59,20 @@ def main():
     print(f"🔄 Iniciando processamento...")
     agora_br = datetime.utcnow() - timedelta(hours=3)
     cliente = autenticar_e_criar_cliente()
-    if not cliente: 
-        print("❌ Erro na autenticação.")
-        return
+    if not cliente: return
 
-    # Abertura da planilha e extração de dados
+    # Leitura da Planilha
     SPREADSHEET_ID = '1TfzqJZFD3yPNCAXAiLyEw876qjOlitae0pP9TTqNCPI'
     try:
         planilha = cliente.open_by_key(SPREADSHEET_ID)
         valores = planilha.worksheet('Tabela dinâmica 2').get('A1:AC8000')
     except Exception as e:
-        print(f"❌ Erro ao ler planilha: {e}")
+        print(f"❌ Erro leitura: {e}")
         return
 
     df = pd.DataFrame(valores[1:], columns=[str(h).strip() for h in valores[0]])
     
-    # Nomes das colunas
+    # Colunas
     COL_TRIP    = 'LH Trip Nnumber'
     COL_ETA     = 'ETA Planejado'
     COL_ORIGEM  = 'station_code'
@@ -88,16 +84,15 @@ def main():
     COL_DOCA    = 'Doca'
     COL_CUTOFF  = 'Cutoff'
 
-    # Tratamento de dados
+    # Tratamento
     df[COL_PACOTES] = pd.to_numeric(df[COL_PACOTES], errors='coerce').fillna(0).astype(int)
-    df = df[df[COL_PACOTES] > 0] # Filtro de pacotes maior que zero
+    df = df[df[COL_PACOTES] > 0] 
 
-    # Conversões de data
     for col in [COL_CHECKIN, COL_ENTRADA, COL_ETA, COL_CUTOFF]:
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], dayfirst=True, errors='coerce')
 
-    # Lógica de Turno Operacional
+    # Turnos e Datas
     if agora_br.time() < dt_time(6, 0): op_date_hoje = agora_br.date() - timedelta(days=1)
     else: op_date_hoje = agora_br.date()
     op_date_amanha = op_date_hoje + timedelta(days=1)
@@ -111,12 +106,11 @@ def main():
     em_doca, em_fila = [], []
     resumo = {'atrasado': {}, 'hoje': {}, 'amanha': {}}
 
-    # Processamento das linhas
     for _, row in df.iterrows():
         status = str(row.get(COL_STATUS, '')).strip().lower()
-        status = status.replace('pendente recepção', 'pendente de chegada') # Padronização
+        status = status.replace('pendente recepção', 'pendente de chegada')
         
-        # 1. Classificação de Resumo (Pendentes)
+        # Resumos
         if 'pendente' in status:
             t = str(row.get(COL_TURNO, 'Indef')).strip()
             cutoff = row.get(COL_CUTOFF)
@@ -133,7 +127,7 @@ def main():
                 resumo[categoria][t]['lts'] += 1
                 resumo[categoria][t]['pacotes'] += row[COL_PACOTES]
 
-        # 2. Classificação de Pátio
+        # Tabela Pátio
         data_ref = row[COL_CHECKIN] if pd.notna(row[COL_CHECKIN]) else row[COL_ENTRADA]
         if pd.notna(data_ref) or status == 'em doca' or 'fila' in status:
             if 'finalizado' in status: continue
@@ -149,12 +143,12 @@ def main():
             if 'fila' in status: em_fila.append((minutos, linha))
             elif status == 'em doca': em_doca.append((minutos, linha))
 
-    # --- Montagem Final ---
+    # --- Montagem Visual Otimizada ---
     em_doca.sort(key=lambda x: x[0], reverse=True)
     em_fila.sort(key=lambda x: x[0], reverse=True)
     header = f"{'LT':^13} | {'Doca':^4} | {'ETA':^11} | {'Chegada':^11} | {'Tempo':^6} | Origem"
     
-    # Bloco de Tabelas
+    # 1. Parte das Tabelas
     bloco_patio = ["Segue as LH´s com mais tempo de Pátio:\n"]
     if em_doca:
         bloco_patio.append(f"🚛 Em Doca: {len(em_doca)} LT(s)\n{header}")
@@ -163,7 +157,7 @@ def main():
         bloco_patio.append(f"\n🔴 Em Fila: {len(em_fila)} LT(s)\n{header}")
         bloco_patio.extend([x[1] for x in em_fila])
 
-    # Bloco de Resumos
+    # 2. Parte dos Resumos
     bloco_resumo = []
     str_amanha = op_date_amanha.strftime('%d/%m/%Y')
     titulos = {'atrasado': '⚠️ Atrasados', 'hoje': '📅 Hoje', 'amanha': f'🌅 Amanhã {str_amanha}'}
@@ -176,20 +170,26 @@ def main():
                 if t in resumo[cat]:
                     bloco_resumo.append(f"   - {t}: {resumo[cat][t]['lts']} LTs ({resumo[cat][t]['pacotes']} pct)")
 
-    # --- Estratégia de Envio ---
+    # --- Estratégia de Envio com Divisória ---
     txt_patio = "\n".join(bloco_patio)
     txt_resumo = "\n".join(bloco_resumo)
-    txt_completo = txt_patio + "\n\n" + txt_resumo
+    
+    # Aqui criamos uma linha divisória para dar "respiro" visual
+    # 72 traços correspondem aproximadamente à largura da tabela no celular
+    linha_divisoria = "\n" + ("-" * 72) + "\n\n"
+    
+    txt_completo = txt_patio + linha_divisoria + txt_resumo
 
-    print("📤 Tentando envio único...")
+    print("📤 Tentando envio único formatado...")
     if not enviar_webhook(txt_completo):
-        print("✂️ Limite excedido. Enviando em blocos separados...")
+        print("✂️ Mensagem longa demais. Dividindo...")
+        # Se falhar, manda separado (o próprio delay de 1.5s já ajuda na leitura)
         enviar_webhook(txt_patio)
         time.sleep(1.5)
         if txt_resumo:
             enviar_webhook(txt_resumo)
     else:
-        print("✅ Enviado em bloco único.")
+        print("✅ Enviado com sucesso.")
 
 if __name__ == '__main__':
     main()
