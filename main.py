@@ -8,7 +8,6 @@ import time
 import os
 import json
 import base64
-import binascii
 
 # --- Configurações e Autenticação ---
 def autenticar_e_criar_cliente():
@@ -58,8 +57,11 @@ def padronizar_doca(doca_str):
 def main():
     print(f"🔄 Iniciando processamento...")
     agora_br = datetime.utcnow() - timedelta(hours=3)
+    
     cliente = autenticar_e_criar_cliente()
-    if not cliente: return
+    if not cliente: 
+        print("❌ FALHA CRÍTICA: Não foi possível autenticar. Verifique a variável GCP_SA_KEY_JSON.")
+        return
 
     # Leitura da Planilha
     SPREADSHEET_ID = '1TfzqJZFD3yPNCAXAiLyEw876qjOlitae0pP9TTqNCPI'
@@ -73,7 +75,8 @@ def main():
     df = pd.DataFrame(valores[1:], columns=[str(h).strip() for h in valores[0]])
     
     # Colunas
-    COL_TRIP    = 'LH Trip Nnumber'
+    # NOTA: Verifique se na sua planilha o cabeçalho é 'LH Trip Number' mesmo
+    COL_TRIP    = 'LH Trip Number' 
     COL_ETA     = 'ETA Planejado'
     COL_ORIGEM  = 'station_code'
     COL_CHECKIN = 'Checkin'
@@ -85,6 +88,7 @@ def main():
     COL_CUTOFF  = 'Cutoff'
 
     # Tratamento
+    # Garante que a coluna de pacotes seja numérica
     df[COL_PACOTES] = pd.to_numeric(df[COL_PACOTES], errors='coerce').fillna(0).astype(int)
     df = df[df[COL_PACOTES] > 0] 
 
@@ -161,20 +165,26 @@ def main():
     bloco_resumo = []
     str_amanha = op_date_amanha.strftime('%d/%m/%Y')
     titulos = {'atrasado': '⚠️ Atrasados', 'hoje': '📅 Hoje', 'amanha': f'🌅 Amanhã {str_amanha}'}
+    
     for cat in ['atrasado', 'hoje', 'amanha']:
         if resumo[cat]:
             total_lts = sum(d['lts'] for d in resumo[cat].values())
             total_pct = sum(d['pacotes'] for d in resumo[cat].values())
+            
             bloco_resumo.append(f"{titulos[cat]}: {total_lts} LTs ({total_pct} pct)")
+            
             for t in ['T1', 'T2', 'T3']:
                 if t in resumo[cat]:
                     bloco_resumo.append(f"   - {t}: {resumo[cat][t]['lts']} LTs ({resumo[cat][t]['pacotes']} pct)")
+            
+            # --- MELHORIA VISUAL ---
+            # Adiciona linha em branco entre as categorias
+            bloco_resumo.append("") 
 
     # --- Estratégia de Envio com Divisória ---
     txt_patio = "\n".join(bloco_patio)
     txt_resumo = "\n".join(bloco_resumo)
     
-    # Aqui criamos uma linha divisória para dar "respiro" visual
     # 72 traços correspondem aproximadamente à largura da tabela no celular
     linha_divisoria = "\n" + ("-" * 72) + "\n\n"
     
@@ -183,7 +193,6 @@ def main():
     print("📤 Tentando envio único formatado...")
     if not enviar_webhook(txt_completo):
         print("✂️ Mensagem longa demais. Dividindo...")
-        # Se falhar, manda separado (o próprio delay de 1.5s já ajuda na leitura)
         enviar_webhook(txt_patio)
         time.sleep(1.5)
         if txt_resumo:
