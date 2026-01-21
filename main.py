@@ -75,8 +75,8 @@ def main():
     df = pd.DataFrame(valores[1:], columns=[str(h).strip() for h in valores[0]])
     
     # Colunas
-    # NOTA: Verifique se na sua planilha o cabeçalho é 'LH Trip Number' mesmo
-    COL_TRIP    = 'LH Trip Number' 
+    # CORREÇÃO: Voltando para 'Nnumber' pois é assim que está na sua planilha
+    COL_TRIP    = 'LH Trip Nnumber' 
     COL_ETA     = 'ETA Planejado'
     COL_ORIGEM  = 'station_code'
     COL_CHECKIN = 'Checkin'
