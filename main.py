@@ -53,9 +53,44 @@ def padronizar_doca(doca_str):
     match = re.search(r'(\d+)$', doca_str)
     return match.group(1) if match else "--"
 
+def aguardar_horario_certo():
+    """
+    Aguarda até o próximo minuto 00 ou 30 para iniciar a execução.
+    Garante que os dados lidos sejam frescos no momento do envio.
+    """
+    print("⏳ Verificando janela de execução (Portões 00 ou 30)...")
+    agora = datetime.utcnow() - timedelta(hours=3) # Horário BR
+    minuto = agora.minute
+    segundo = agora.second
+    
+    # Lógica do Portão:
+    # Se estamos entre 00 e 29, o alvo é 30.
+    # Se estamos entre 30 e 59, o alvo é 00 (da próxima hora).
+    if minuto < 30:
+        minutos_para_esperar = 30 - minuto
+    else:
+        minutos_para_esperar = 60 - minuto
+        
+    # Calcula total em segundos menos os segundos que já passaram
+    segundos_totais = (minutos_para_esperar * 60) - segundo
+    
+    # Se for exatamente a hora (segundos_totais = 0 ou 1800 redondos), não espera
+    if segundos_totais <= 1:
+        print("✅ Hora exata! Iniciando execução imediatamente.")
+        return
+
+    hora_alvo = agora + timedelta(seconds=segundos_totais)
+    print(f"⏸️ Aguardando {int(segundos_totais)}s até {hora_alvo.strftime('%H:%M:%S')} para ler a origem...")
+    
+    time.sleep(segundos_totais)
+    print("▶️ Retomando execução no horário programado!")
+
 # --- Lógica Principal ---
 def main():
-    print(f"🔄 Iniciando processamento...")
+    # 1. Aguarda o portão (00 ou 30) ANTES de tudo
+    aguardar_horario_certo()
+
+    print(f"🔄 Iniciando processamento de dados...")
     agora_br = datetime.utcnow() - timedelta(hours=3)
     
     cliente = autenticar_e_criar_cliente()
@@ -75,7 +110,7 @@ def main():
     df = pd.DataFrame(valores[1:], columns=[str(h).strip() for h in valores[0]])
     
     # Colunas
-    # CORREÇÃO: Voltando para 'Nnumber' pois é assim que está na sua planilha
+    # Mantido 'Nnumber' com dois Ns conforme sua planilha
     COL_TRIP    = 'LH Trip Nnumber' 
     COL_ETA     = 'ETA Planejado'
     COL_ORIGEM  = 'station_code'
@@ -88,7 +123,6 @@ def main():
     COL_CUTOFF  = 'Cutoff'
 
     # Tratamento
-    # Garante que a coluna de pacotes seja numérica
     df[COL_PACOTES] = pd.to_numeric(df[COL_PACOTES], errors='coerce').fillna(0).astype(int)
     df = df[df[COL_PACOTES] > 0] 
 
@@ -177,15 +211,12 @@ def main():
                 if t in resumo[cat]:
                     bloco_resumo.append(f"   - {t}: {resumo[cat][t]['lts']} LTs ({resumo[cat][t]['pacotes']} pct)")
             
-            # --- MELHORIA VISUAL ---
-            # Adiciona linha em branco entre as categorias
+            # Espaçamento visual
             bloco_resumo.append("") 
 
-    # --- Estratégia de Envio com Divisória ---
+    # --- Envio ---
     txt_patio = "\n".join(bloco_patio)
     txt_resumo = "\n".join(bloco_resumo)
-    
-    # 72 traços correspondem aproximadamente à largura da tabela no celular
     linha_divisoria = "\n" + ("-" * 72) + "\n\n"
     
     txt_completo = txt_patio + linha_divisoria + txt_resumo
