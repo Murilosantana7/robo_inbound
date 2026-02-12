@@ -98,13 +98,37 @@ def main():
         print("❌ FALHA CRÍTICA: Não foi possível autenticar. Verifique a variável GCP_SA_KEY_JSON.")
         return
 
-    # Leitura da Planilha
+    # Leitura da Planilha com Lógica de Retry (Proteção contra atualização)
     SPREADSHEET_ID = '1TfzqJZFD3yPNCAXAiLyEw876qjOlitae0pP9TTqNCPI'
-    try:
-        planilha = cliente.open_by_key(SPREADSHEET_ID)
-        valores = planilha.worksheet('Tabela dinâmica 2').get('A1:AC8000')
-    except Exception as e:
-        print(f"❌ Erro leitura: {e}")
+    valores = []
+    
+    for tentativa in range(3):
+        try:
+            planilha = cliente.open_by_key(SPREADSHEET_ID)
+            temp_valores = planilha.worksheet('Tabela dinâmica 2').get('A1:AC8000')
+            
+            # Se tiver mais de 1 linha, significa que tem cabeçalho + dados.
+            if len(temp_valores) > 1:
+                valores = temp_valores
+                break
+            else:
+                # Se tiver 0 ou 1 linha, pode estar atualizando
+                print(f"⚠️ Base parece estar atualizando (apenas cabeçalho). Aguardando 5s... (Tentativa {tentativa+1}/3)")
+                time.sleep(5)
+                
+                # Se for a última tentativa, aceita o que vier (mesmo que seja vazio)
+                if tentativa == 2:
+                    valores = temp_valores
+
+        except Exception as e:
+            print(f"❌ Erro leitura: {e}")
+            time.sleep(5) # Espera um pouco antes de tentar de novo em caso de erro de rede
+            if tentativa == 2:
+                return
+
+    # Se após as tentativas a lista estiver vazia
+    if not valores:
+        print("❌ Não foi possível ler os dados da planilha.")
         return
 
     df = pd.DataFrame(valores[1:], columns=[str(h).strip() for h in valores[0]])
