@@ -83,7 +83,7 @@ def main():
     # =========================================================================
     # PARTE 1: Processar o PÁTIO (Aba 'Report')
     # =========================================================================
-    raw_report = ler_aba_com_retry(planilha, 'Report', 'A1:K8000')
+    raw_report = ler_aba_com_retry(planilha, 'Report', 'A1:L8000')
     
     em_descarregando, em_doca, em_fila = [], [], []
     
@@ -93,11 +93,12 @@ def main():
         # Mapeamento Report
         C_TRIP    = 'LH Trip Nnumber' 
         C_ETA     = 'ETA Planejado'
-        C_ORIGEM  = 'station_code'
+        C_ORIGEM  = 'station_code' # Coluna D
         C_CHECKIN = 'Checkin'
         C_ENTRADA = 'Add to Queue Time'
         C_STATUS  = 'Status'
         C_DOCA    = 'Doca'
+        C_TO      = 'TO'
 
         # Converter datas
         for col in [C_CHECKIN, C_ENTRADA, C_ETA]:
@@ -107,20 +108,22 @@ def main():
         for _, row in df_rep.iterrows():
             status = str(row.get(C_STATUS, '')).strip().lower()
             
-            # Filtra apenas o que interessa para o pátio
             if any(s in status for s in ['descarregando', 'doca', 'fila']) and 'finalizado' not in status:
                 
                 data_ref = row[C_CHECKIN] if pd.notna(row[C_CHECKIN]) else row[C_ENTRADA]
                 
                 trip = str(row.get(C_TRIP, '???')).strip()
                 doca = padronizar_doca(str(row.get(C_DOCA, '--')))
+                val_to = str(row.get(C_TO, '--')).strip()
+                origem = str(row.get(C_ORIGEM, '--')).strip() # Pega a origem (Col D)
+                
                 eta_s = row[C_ETA].strftime('%d/%m %H:%M') if pd.notna(row[C_ETA]) else '--/-- --:--'
-                che_s = data_ref.strftime('%d/%m %H:%M') if pd.notna(data_ref) else '--/-- --:--'
                 
                 minutos = int((agora_br - data_ref).total_seconds() / 60) if pd.notna(data_ref) else -999999
                 tempo = minutos_para_hhmm(minutos)
                 
-                linha = f"{trip:^13} | {doca:^4} | {eta_s:^11} | {che_s:^11} | {tempo:^6} | {str(row.get(C_ORIGEM, '--'))}"
+                # --- ALTERAÇÃO AQUI: Origem movida para depois da LT ---
+                linha = f"{trip:^13} | {origem:^10} | {doca:^4} | {val_to:^7} | {eta_s:^11} | {tempo:^6}"
                 
                 if 'descarregando' in status: em_descarregando.append((minutos, linha))
                 elif 'doca' in status: em_doca.append((minutos, linha))
@@ -129,8 +132,7 @@ def main():
     # =========================================================================
     # PARTE 2: Processar o RESUMO (Aba 'Pendente')
     # =========================================================================
-    # Agora lê até a coluna E para pegar o status "Descarregado"
-    raw_pendente = ler_aba_com_retry(planilha, 'Pendente', 'A1:E8000') 
+    raw_pendente = ler_aba_com_retry(planilha, 'Pendente', 'A1:F8000') 
     
     resumo = {'atrasado': {}, 'hoje': {}, 'amanha': {}}
     
@@ -148,29 +150,30 @@ def main():
     if raw_pendente:
         df_pen = pd.DataFrame(raw_pendente[1:], columns=[str(h).strip() for h in raw_pendente[0]])
         
-        # Identifica nome da coluna de saída (pode ser "Descarregado" ou similar)
         col_saida = next((c for c in df_pen.columns if 'descarregado' in c.lower()), None)
+        df_pen.columns = [c.strip() for c in df_pen.columns]
         
-        # Garante nomes corretos para as outras colunas
-        df_pen.columns = [c.capitalize() for c in df_pen.columns] # Padroniza 'pacotes' -> 'Pacotes'
+        col_pacotes = next((c for c in df_pen.columns if 'acote' in c.lower()), 'Pacotes')
+        col_to = next((c for c in df_pen.columns if c.upper() == 'TO'), 'TO')
         
-        df_pen['Pacotes'] = pd.to_numeric(df_pen['Pacotes'], errors='coerce').fillna(0).astype(int)
-        df_pen['Data'] = pd.to_datetime(df_pen['Data'], dayfirst=True, errors='coerce')
+        df_pen[col_pacotes] = pd.to_numeric(df_pen[col_pacotes], errors='coerce').fillna(0).astype(int)
+        df_pen[col_to] = pd.to_numeric(df_pen[col_to], errors='coerce').fillna(0).astype(int)
+        
+        col_data = next((c for c in df_pen.columns if 'ata' in c.lower()), 'Data')
+        df_pen[col_data] = pd.to_datetime(df_pen[col_data], dayfirst=True, errors='coerce')
         
         for _, row in df_pen.iterrows():
-            if pd.isna(row['Data']): continue # Pula se não tiver data
+            if pd.isna(row[col_data]): continue 
             
-            # --- NOVA LÓGICA DE FILTRO ---
-            # Se a coluna "Descarregado" existe e tem valor, pula a linha (não é pendente)
             if col_saida:
                 val_saida = str(row.get(col_saida, '')).strip()
                 if val_saida and val_saida.lower() != 'nan' and val_saida.lower() != 'none':
                     continue 
-            # -----------------------------
 
             t = str(row.get('Turno', 'Indef')).strip().upper()
-            pct = row['Pacotes']
-            d_alvo = row['Data'].date()
+            pct = row[col_pacotes]
+            val_to = row[col_to]
+            d_alvo = row[col_data].date()
             
             categoria = None
             if d_alvo < op_date_hoje: 
@@ -182,9 +185,11 @@ def main():
                 categoria = 'amanha'
             
             if categoria:
-                if t not in resumo[categoria]: resumo[categoria][t] = {'lts': 0, 'pacotes': 0}
+                if t not in resumo[categoria]: 
+                    resumo[categoria][t] = {'lts': 0, 'pacotes': 0, 'tos': 0}
                 resumo[categoria][t]['lts'] += 1
                 resumo[categoria][t]['pacotes'] += pct
+                resumo[categoria][t]['tos'] += val_to
 
     # =========================================================================
     # MONTAGEM DA MENSAGEM
@@ -193,7 +198,8 @@ def main():
     em_doca.sort(key=lambda x: x[0], reverse=True)
     em_fila.sort(key=lambda x: x[0], reverse=True)
     
-    header = f"{'LT':^13} | {'Doca':^4} | {'ETA':^11} | {'Chegada':^11} | {'Tempo':^6} | Origem"
+    # Cabeçalho atualizado com Origem (Col D) na posição 2
+    header = f"{'LT':^13} | {'Origem':^10} | {'Doca':^4} | {'TO':^7} | {'ETA':^11} | {'Tempo':^6}"
     bloco_patio = ["Segue as LH´s com mais tempo de Pátio:\n"]
     
     if em_descarregando:
@@ -218,12 +224,13 @@ def main():
     for cat in ['atrasado', 'hoje', 'amanha']:
         total_lts = sum(d['lts'] for d in resumo[cat].values())
         total_pct = sum(d['pacotes'] for d in resumo[cat].values())
+        total_tos = sum(d['tos'] for d in resumo[cat].values())
         
-        bloco_resumo.append(f"{titulos[cat]}: {total_lts} LTs ({total_pct} pcts)")
+        bloco_resumo.append(f"{titulos[cat]}: {total_lts} LTs ({total_pct} pcts | {total_tos} TO)")
         
         for t in sorted(resumo[cat].keys()):
             r = resumo[cat][t]
-            bloco_resumo.append(f"   - {t}: {r['lts']} LTs ({r['pacotes']} pcts)")
+            bloco_resumo.append(f"   - {t}: {r['lts']} LTs ({r['pacotes']} pcts | {r['tos']} TO)")
         
         bloco_resumo.append("") 
 
