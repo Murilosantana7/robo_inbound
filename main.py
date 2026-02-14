@@ -24,7 +24,7 @@ def autenticar_e_criar_cliente():
 
 def enviar_webhook(mensagem_txt):
     """
-    Tenta enviar a mensagem. Retorna True se sucesso, False se falhar (ex: muito longa).
+    Tenta enviar a mensagem. Retorna True se sucesso, False se falhar.
     """
     webhook_url = os.environ.get('SEATALK_WEBHOOK_URL') 
     if not webhook_url: return False
@@ -53,88 +53,52 @@ def padronizar_doca(doca_str):
     match = re.search(r'(\d+)$', doca_str)
     return match.group(1) if match else "--"
 
-def aguardar_horario_certo():
-    """
-    Aguarda até o próximo minuto 00 ou 30 para iniciar a execução.
-    Garante que os dados lidos sejam frescos no momento do envio.
-    """
-    print("⏳ Verificando janela de execução (Portões 00 ou 30)...")
-    agora = datetime.utcnow() - timedelta(hours=3) # Horário BR
-    minuto = agora.minute
-    segundo = agora.second
-    
-    # Lógica do Portão:
-    # Se estamos entre 00 e 29, o alvo é 30.
-    # Se estamos entre 30 e 59, o alvo é 00 (da próxima hora).
-    if minuto < 30:
-        minutos_para_esperar = 30 - minuto
-    else:
-        minutos_para_esperar = 60 - minuto
-        
-    # Calcula total em segundos menos os segundos que já passaram
-    segundos_totais = (minutos_para_esperar * 60) - segundo
-    
-    # Se for exatamente a hora (segundos_totais = 0 ou 1800 redondos), não espera
-    if segundos_totais <= 1:
-        print("✅ Hora exata! Iniciando execução imediatamente.")
-        return
-
-    hora_alvo = agora + timedelta(seconds=segundos_totais)
-    print(f"⏸️ Aguardando {int(segundos_totais)}s até {hora_alvo.strftime('%H:%M:%S')} para ler a origem...")
-    
-    time.sleep(segundos_totais)
-    print("▶️ Retomando execução no horário programado!")
-
 # --- Lógica Principal ---
 def main():
-    # 1. Aguarda o portão (00 ou 30) ANTES de tudo
-    aguardar_horario_certo()
+    # REMOVIDO: aguardar_horario_certo() 
+    # O script agora roda imediatamente.
 
     print(f"🔄 Iniciando processamento de dados...")
     agora_br = datetime.utcnow() - timedelta(hours=3)
     
     cliente = autenticar_e_criar_cliente()
     if not cliente: 
-        print("❌ FALHA CRÍTICA: Não foi possível autenticar. Verifique a variável GCP_SA_KEY_JSON.")
+        print("❌ FALHA CRÍTICA: Não foi possível autenticar.")
         return
 
-    # Leitura da Planilha com Lógica de Retry (Proteção contra atualização)
+    # Leitura da Planilha
     SPREADSHEET_ID = '1TfzqJZFD3yPNCAXAiLyEw876qjOlitae0pP9TTqNCPI'
     valores = []
     
     for tentativa in range(3):
         try:
             planilha = cliente.open_by_key(SPREADSHEET_ID)
-            temp_valores = planilha.worksheet('Tabela dinâmica 2').get('A1:AC8000')
+            # Lê a aba 'Report' da coluna A até K
+            temp_valores = planilha.worksheet('Report').get('A1:K8000')
             
-            # Se tiver mais de 1 linha, significa que tem cabeçalho + dados.
             if len(temp_valores) > 1:
                 valores = temp_valores
                 break
             else:
-                # Se tiver 0 ou 1 linha, pode estar atualizando
-                print(f"⚠️ Base parece estar atualizando (apenas cabeçalho). Aguardando 5s... (Tentativa {tentativa+1}/3)")
+                print(f"⚠️ Base parece estar atualizando. Aguardando 5s... (Tentativa {tentativa+1}/3)")
                 time.sleep(5)
-                
-                # Se for a última tentativa, aceita o que vier (mesmo que seja vazio)
                 if tentativa == 2:
                     valores = temp_valores
 
         except Exception as e:
             print(f"❌ Erro leitura: {e}")
-            time.sleep(5) # Espera um pouco antes de tentar de novo em caso de erro de rede
+            time.sleep(5)
             if tentativa == 2:
                 return
 
-    # Se após as tentativas a lista estiver vazia
     if not valores:
         print("❌ Não foi possível ler os dados da planilha.")
         return
 
+    # Cria DataFrame
     df = pd.DataFrame(valores[1:], columns=[str(h).strip() for h in valores[0]])
     
-    # Colunas
-    # Mantido 'Nnumber' com dois Ns conforme sua planilha
+    # Mapeamento de Colunas
     COL_TRIP    = 'LH Trip Nnumber' 
     COL_ETA     = 'ETA Planejado'
     COL_ORIGEM  = 'station_code'
@@ -165,14 +129,15 @@ def main():
     elif dt_time(14, 0) <= hora_atual < dt_time(22, 0): turno_atual_str = "T2"
     mapa_turnos = {'T1': 1, 'T2': 2, 'T3': 3}
 
-    em_doca, em_fila = [], []
+    # Listas separadas para as 3 categorias
+    em_descarregando, em_doca, em_fila = [], [], []
     resumo = {'atrasado': {}, 'hoje': {}, 'amanha': {}}
 
     for _, row in df.iterrows():
         status = str(row.get(COL_STATUS, '')).strip().lower()
         status = status.replace('pendente recepção', 'pendente de chegada')
         
-        # Resumos
+        # --- Lógica de Resumo (Pendentes) ---
         if 'pendente' in status:
             t = str(row.get(COL_TURNO, 'Indef')).strip()
             cutoff = row.get(COL_CUTOFF)
@@ -189,37 +154,58 @@ def main():
                 resumo[categoria][t]['lts'] += 1
                 resumo[categoria][t]['pacotes'] += row[COL_PACOTES]
 
-        # Tabela Pátio
+        # --- Lógica de Pátio (Descarregando / Doca / Fila) ---
         data_ref = row[COL_CHECKIN] if pd.notna(row[COL_CHECKIN]) else row[COL_ENTRADA]
-        if pd.notna(data_ref) or status == 'em doca' or 'fila' in status:
+        
+        # Se tem status relevante
+        if 'descarregando' in status or 'doca' in status or 'fila' in status:
             if 'finalizado' in status: continue
             
             trip = str(row.get(COL_TRIP, '???')).strip()
             doca = padronizar_doca(str(row.get(COL_DOCA, '--')))
             eta_s = row[COL_ETA].strftime('%d/%m %H:%M') if pd.notna(row[COL_ETA]) else '--/-- --:--'
             che_s = data_ref.strftime('%d/%m %H:%M') if pd.notna(data_ref) else '--/-- --:--'
+            
             minutos = int((agora_br - data_ref).total_seconds() / 60) if pd.notna(data_ref) else -999999
             tempo = minutos_para_hhmm(minutos)
             
             linha = f"{trip:^13} | {doca:^4} | {eta_s:^11} | {che_s:^11} | {tempo:^6} | {str(row.get(COL_ORIGEM, '--'))}"
-            if 'fila' in status: em_fila.append((minutos, linha))
-            elif status == 'em doca': em_doca.append((minutos, linha))
+            
+            # Classificação Prioritária
+            if 'descarregando' in status:
+                em_descarregando.append((minutos, linha))
+            elif 'doca' in status: # Pega 'em doca'
+                em_doca.append((minutos, linha))
+            elif 'fila' in status:
+                em_fila.append((minutos, linha))
 
-    # --- Montagem Visual Otimizada ---
+    # --- Montagem Visual ---
+    em_descarregando.sort(key=lambda x: x[0], reverse=True)
     em_doca.sort(key=lambda x: x[0], reverse=True)
     em_fila.sort(key=lambda x: x[0], reverse=True)
+    
     header = f"{'LT':^13} | {'Doca':^4} | {'ETA':^11} | {'Chegada':^11} | {'Tempo':^6} | Origem"
     
-    # 1. Parte das Tabelas
     bloco_patio = ["Segue as LH´s com mais tempo de Pátio:\n"]
+    
+    # 1. Prioridade: Descarregando
+    if em_descarregando:
+        bloco_patio.append(f"📦 Descarregando: {len(em_descarregando)} LT(s)\n{header}")
+        bloco_patio.extend([x[1] for x in em_descarregando])
+        
+    # 2. Prioridade: Em Doca
     if em_doca:
-        bloco_patio.append(f"🚛 Em Doca: {len(em_doca)} LT(s)\n{header}")
+        prefixo = "\n" if em_descarregando else ""
+        bloco_patio.append(f"{prefixo}🚛 Em Doca: {len(em_doca)} LT(s)\n{header}")
         bloco_patio.extend([x[1] for x in em_doca])
+        
+    # 3. Prioridade: Fila
     if em_fila:
-        bloco_patio.append(f"\n🔴 Em Fila: {len(em_fila)} LT(s)\n{header}")
+        prefixo = "\n" if (em_descarregando or em_doca) else ""
+        bloco_patio.append(f"{prefixo}🔴 Em Fila: {len(em_fila)} LT(s)\n{header}")
         bloco_patio.extend([x[1] for x in em_fila])
 
-    # 2. Parte dos Resumos
+    # --- Resumo ---
     bloco_resumo = []
     str_amanha = op_date_amanha.strftime('%d/%m/%Y')
     titulos = {'atrasado': '⚠️ Atrasados', 'hoje': '📅 Hoje', 'amanha': f'🌅 Amanhã {str_amanha}'}
@@ -234,8 +220,6 @@ def main():
             for t in ['T1', 'T2', 'T3']:
                 if t in resumo[cat]:
                     bloco_resumo.append(f"   - {t}: {resumo[cat][t]['lts']} LTs ({resumo[cat][t]['pacotes']} pct)")
-            
-            # Espaçamento visual
             bloco_resumo.append("") 
 
     # --- Envio ---
