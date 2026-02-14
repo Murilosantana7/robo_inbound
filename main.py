@@ -62,9 +62,40 @@ def ler_aba_com_retry(planilha, nome_aba, range_celulas):
             time.sleep(3)
     return []
 
+def aguardar_horario_certo():
+    """
+    Aguarda até o próximo minuto 00 ou 30 para iniciar a execução.
+    """
+    print("⏳ Verificando janela de execução (Portões 00 ou 30)...")
+    agora = datetime.utcnow() - timedelta(hours=3) # Horário BR
+    minuto = agora.minute
+    segundo = agora.second
+    
+    # Lógica do Portão: 00 ou 30
+    if minuto < 30:
+        minutos_para_esperar = 30 - minuto
+    else:
+        minutos_para_esperar = 60 - minuto
+        
+    segundos_totais = (minutos_para_esperar * 60) - segundo
+    
+    # Se já estiver na hora exata (tolerância de 1s), roda direto
+    if segundos_totais <= 1:
+        print("✅ Hora exata! Iniciando execução imediatamente.")
+        return
+
+    hora_alvo = agora + timedelta(seconds=segundos_totais)
+    print(f"⏸️ Aguardando {int(segundos_totais)}s até {hora_alvo.strftime('%H:%M:%S')} para iniciar...")
+    
+    time.sleep(segundos_totais)
+    print("▶️ Retomando execução no horário programado!")
+
 # --- Lógica Principal ---
 def main():
-    print(f"🔄 Iniciando processamento...")
+    # 1. Aguarda o portão (00 ou 30) ANTES de ler qualquer coisa
+    aguardar_horario_certo()
+
+    print(f"🔄 Iniciando processamento de dados...")
     agora_br = datetime.utcnow() - timedelta(hours=3)
     
     cliente = autenticar_e_criar_cliente()
@@ -122,7 +153,7 @@ def main():
                 minutos = int((agora_br - data_ref).total_seconds() / 60) if pd.notna(data_ref) else -999999
                 tempo = minutos_para_hhmm(minutos)
                 
-                # --- ALTERAÇÃO AQUI: Origem movida para O FINAL ---
+                # Montagem da Linha: Origem no FINAL
                 linha = f"{trip:^13} | {doca:^4} | {val_to:^7} | {eta_s:^11} | {tempo:^6} | {origem:^10}"
                 
                 if 'descarregando' in status: em_descarregando.append((minutos, linha))
@@ -198,7 +229,7 @@ def main():
     em_doca.sort(key=lambda x: x[0], reverse=True)
     em_fila.sort(key=lambda x: x[0], reverse=True)
     
-    # --- ALTERAÇÃO AQUI: Header atualizado com Origem no final ---
+    # Cabeçalho: Origem no FINAL
     header = f"{'LT':^13} | {'Doca':^4} | {'TO':^7} | {'ETA':^11} | {'Tempo':^6} | {'Origem':^10}"
     bloco_patio = ["Segue as LH´s com mais tempo de Pátio:\n"]
     
