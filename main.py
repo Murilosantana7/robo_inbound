@@ -41,6 +41,8 @@ def enviar_webhook(mensagem_txt):
 
 # --- Funções de Apoio ---
 def minutos_para_hhmm(minutos):
+    if minutos == -999: # Código especial para 00:00
+        return "00:00"
     sinal = "-" if minutos < 0 else ""
     m = abs(minutos)
     return f"{sinal}{m // 60:02d}:{m % 60:02d}"
@@ -122,11 +124,20 @@ def main():
                 eta_val = row.get(C_ETA)
                 eta_s = eta_val.strftime('%d/%m %H:%M') if pd.notna(eta_val) else '--/-- --:--'
                 
-                if pd.notna(data_ref):
-                    minutos = int((agora_br - data_ref).total_seconds() / 60)
+                # --- AJUSTE SOLICITADO PARA "EM FILA" ---
+                if 'fila' in status:
+                    # Se não houver horário de Checkin (data_ref nula), força 00:00
+                    if pd.isna(row.get(C_CHECKIN)):
+                        minutos = -999
+                    else:
+                        minutos = int((agora_br - row[C_CHECKIN]).total_seconds() / 60)
                 else:
-                    minutos = -999999
-                    
+                    # Lógica normal para Descarregando e Doca
+                    if pd.notna(data_ref):
+                        minutos = int((agora_br - data_ref).total_seconds() / 60)
+                    else:
+                        minutos = 0 # Fallback padrão
+
                 tempo = minutos_para_hhmm(minutos)
                 linha = f"{lt_atual:^13} | {doca:^4} | {val_to:^7} | {eta_s:^11} | {tempo:^6} | {origem:^10}"
                 
@@ -137,7 +148,7 @@ def main():
                 elif 'fila' in status:
                     em_fila.append((minutos, linha))
 
-    # --- PARTE 2: Processar 'Deu chegada' ---
+    # --- PARTE 2: Processar 'Deu chegada' (PERMANECE ORIGINAL) ---
     raw_chegada_manual = ler_aba_com_retry(planilha, 'Deu chegada', 'A1:F1000')
     if raw_chegada_manual:
         cols_manual = [str(h).strip() for h in raw_chegada_manual[0]]
