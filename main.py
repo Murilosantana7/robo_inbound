@@ -129,7 +129,8 @@ def main():
     # =========================================================================
     # PARTE 2: Processar o RESUMO (Aba 'Pendente')
     # =========================================================================
-    raw_pendente = ler_aba_com_retry(planilha, 'Pendente', 'A1:D8000') # Colunas A, B, C, D
+    # Agora lê até a coluna E para pegar o status "Descarregado"
+    raw_pendente = ler_aba_com_retry(planilha, 'Pendente', 'A1:E8000') 
     
     resumo = {'atrasado': {}, 'hoje': {}, 'amanha': {}}
     
@@ -145,14 +146,13 @@ def main():
     mapa_turnos = {'T1': 1, 'T2': 2, 'T3': 3}
 
     if raw_pendente:
-        # Colunas esperadas: LT (A), Data (B), Turno (C), Pacotes (D)
         df_pen = pd.DataFrame(raw_pendente[1:], columns=[str(h).strip() for h in raw_pendente[0]])
         
-        # Ajuste nomes se necessário (case insensitive)
-        df_pen.columns = [c.capitalize() for c in df_pen.columns] # Ex: 'pacotes' vira 'Pacotes'
+        # Identifica nome da coluna de saída (pode ser "Descarregado" ou similar)
+        col_saida = next((c for c in df_pen.columns if 'descarregado' in c.lower()), None)
         
-        # Garante nomes corretos baseados na sua imagem
-        # Se na planilha for "Data", o script lê "Data".
+        # Garante nomes corretos para as outras colunas
+        df_pen.columns = [c.capitalize() for c in df_pen.columns] # Padroniza 'pacotes' -> 'Pacotes'
         
         df_pen['Pacotes'] = pd.to_numeric(df_pen['Pacotes'], errors='coerce').fillna(0).astype(int)
         df_pen['Data'] = pd.to_datetime(df_pen['Data'], dayfirst=True, errors='coerce')
@@ -160,6 +160,14 @@ def main():
         for _, row in df_pen.iterrows():
             if pd.isna(row['Data']): continue # Pula se não tiver data
             
+            # --- NOVA LÓGICA DE FILTRO ---
+            # Se a coluna "Descarregado" existe e tem valor, pula a linha (não é pendente)
+            if col_saida:
+                val_saida = str(row.get(col_saida, '')).strip()
+                if val_saida and val_saida.lower() != 'nan' and val_saida.lower() != 'none':
+                    continue 
+            # -----------------------------
+
             t = str(row.get('Turno', 'Indef')).strip().upper()
             pct = row['Pacotes']
             d_alvo = row['Data'].date()
@@ -168,7 +176,6 @@ def main():
             if d_alvo < op_date_hoje: 
                 categoria = 'atrasado'
             elif d_alvo == op_date_hoje:
-                # Se for hoje, mas o turno já passou, é atrasado
                 eh_turno_passado = mapa_turnos.get(t, 99) < mapa_turnos.get(turno_atual_str, 0)
                 categoria = 'atrasado' if eh_turno_passado else 'hoje'
             elif d_alvo == op_date_amanha: 
@@ -209,22 +216,16 @@ def main():
     titulos = {'atrasado': '⚠️ Atrasados', 'hoje': '📅 Hoje', 'amanha': f'🌅 Amanhã {str_amanha}'}
     
     for cat in ['atrasado', 'hoje', 'amanha']:
-        # Verifica se tem dados nessa categoria
-        tem_dados = len(resumo[cat]) > 0
-        
-        # Calcula totais
         total_lts = sum(d['lts'] for d in resumo[cat].values())
         total_pct = sum(d['pacotes'] for d in resumo[cat].values())
         
-        # Adiciona título (exibe mesmo que esteja zerado, ou você pode colocar 'if tem_dados:')
         bloco_resumo.append(f"{titulos[cat]}: {total_lts} LTs ({total_pct} pcts)")
         
-        # Ordena turnos T1, T2, T3
         for t in sorted(resumo[cat].keys()):
             r = resumo[cat][t]
             bloco_resumo.append(f"   - {t}: {r['lts']} LTs ({r['pacotes']} pcts)")
         
-        bloco_resumo.append("") # Linha em branco entre blocos
+        bloco_resumo.append("") 
 
     # Envio
     txt_patio = "\n".join(bloco_patio)
