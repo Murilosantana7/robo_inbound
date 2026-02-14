@@ -65,28 +65,9 @@ def ler_aba_com_retry(planilha, nome_aba, range_celulas):
             time.sleep(3)
     return []
 
-def aguardar_proximo_intervalo():
-    """Faz o script pausar até o próximo XX:00 ou XX:30."""
-    agora = datetime.utcnow() - timedelta(hours=3)
-    minutos = agora.minute
-    segundos = agora.second
-    
-    if minutos < 30:
-        minutos_espera = 30 - minutos
-    else:
-        minutos_espera = 60 - minutos
-        
-    total_segundos = (minutos_espera * 60) - segundos
-    
-    # Previsão de horário para o log
-    proximo = agora + timedelta(seconds=total_segundos)
-    print(f"⏳ Aguardando... Próximo disparo em {minutos_espera}min às {proximo.strftime('%H:%M:00')}")
-    
-    time.sleep(total_segundos)
-
 # --- Lógica Principal ---
 def main():
-    print(f"🔄 Iniciando processamento de dados (Tolerância 10min em Chegada)...")
+    print(f"🔄 Iniciando processamento de dados (Execução única)...")
     agora_br = datetime.utcnow() - timedelta(hours=3)
     
     cliente = autenticar_e_criar_cliente()
@@ -285,16 +266,7 @@ def main():
         print("✅ Sucesso!")
 
 if __name__ == '__main__':
-    while True:
-        # 1. Aguarda o próximo horário (XX:00 ou XX:30)
-        aguardar_proximo_intervalo()
-        
-        # 2. Executa a lógica
-        try:
-            main()
-        except Exception as e:
-            print(f"❌ Erro inesperado: {e}")
-        
-        # 3. Dorme 10 segundos apenas para garantir que não 
-        # execute duas vezes no mesmo segundo exato.
-        time.sleep(10)
+    try:
+        main()
+    except Exception as e:
+        print(f"❌ Erro inesperado: {e}")
