@@ -67,9 +67,8 @@ def ler_aba_com_retry(planilha, nome_aba, range_celulas):
 
 # --- Lógica Principal ---
 def main():
-    # REMOVIDO: aguardar_horario_certo() -> Executa imediatamente
-
-    print(f"🔄 Iniciando processamento de dados (Modo Teste)...")
+    # Modo Teste: Roda imediatamente sem esperar horário
+    print(f"🔄 Iniciando processamento de dados (Ajuste Origem Col F + Filtro Atrasados)...")
     agora_br = datetime.utcnow() - timedelta(hours=3)
     
     cliente = autenticar_e_criar_cliente()
@@ -156,7 +155,7 @@ def main():
     # =========================================================================
     # PARTE 2: Processar 'Deu chegada' (Apenas o que NÃO estava no Report)
     # =========================================================================
-    # Lendo colunas A até F para pegar LT, Origem, TO, ETA, Chegada
+    # Lendo colunas A até F para pegar LT, TO, ETA, Chegada e CODE (F)
     raw_chegada_manual = ler_aba_com_retry(planilha, 'Deu chegada', 'A1:F1000')
 
     if raw_chegada_manual:
@@ -165,7 +164,10 @@ def main():
         
         # Mapeamento de colunas da aba manual
         col_lt_m = next((c for c in df_manual.columns if c.upper() == 'LT'), 'LT')
-        col_origem_m = next((c for c in df_manual.columns if 'Origem' in c), 'Origem')
+        
+        # ALTERAÇÃO 1: Mapear 'Origem' para a coluna 'code' (que é a F no print)
+        col_origem_m = next((c for c in df_manual.columns if 'code' in c.lower()), 'code')
+        
         col_tos_m = next((c for c in df_manual.columns if 'TOs' in c), 'TOs')
         col_eta_m = next((c for c in df_manual.columns if 'ETA' in c), 'ETA Planejado')
         col_chegada_m = next((c for c in df_manual.columns if 'Chegada' in c), 'Chegada') # Coluna E
@@ -187,7 +189,7 @@ def main():
                 # Monta os dados com base na aba manual
                 doca = "--" # Manual não tem doca
                 val_to = str(row.get(col_tos_m, '--')).strip()
-                origem = str(row.get(col_origem_m, '--')).strip()
+                origem = str(row.get(col_origem_m, '--')).strip() # Agora pega da coluna 'code'
                 
                 eta_val = row.get(col_eta_m)
                 eta_s = eta_val.strftime('%d/%m %H:%M') if pd.notna(eta_val) else '--/-- --:--'
@@ -254,6 +256,10 @@ def main():
             elif d_alvo == op_date_amanha: 
                 categoria = 'amanha'
             
+            # ALTERAÇÃO 2: Se for atrasado, mas tiver 0 pacotes, ignora
+            if categoria == 'atrasado' and pct == 0:
+                categoria = None
+
             if categoria:
                 if t not in resumo[categoria]: 
                     resumo[categoria][t] = {'lts': 0, 'pacotes': 0, 'tos': 0}
