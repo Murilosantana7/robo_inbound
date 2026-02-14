@@ -65,6 +65,25 @@ def ler_aba_com_retry(planilha, nome_aba, range_celulas):
             time.sleep(3)
     return []
 
+def aguardar_proximo_intervalo():
+    """Faz o script pausar até o próximo XX:00 ou XX:30."""
+    agora = datetime.utcnow() - timedelta(hours=3)
+    minutos = agora.minute
+    segundos = agora.second
+    
+    if minutos < 30:
+        minutos_espera = 30 - minutos
+    else:
+        minutos_espera = 60 - minutos
+        
+    total_segundos = (minutos_espera * 60) - segundos
+    
+    # Previsão de horário para o log
+    proximo = agora + timedelta(seconds=total_segundos)
+    print(f"⏳ Aguardando... Próximo disparo em {minutos_espera}min às {proximo.strftime('%H:%M:00')}")
+    
+    time.sleep(total_segundos)
+
 # --- Lógica Principal ---
 def main():
     print(f"🔄 Iniciando processamento de dados (Tolerância 10min em Chegada)...")
@@ -86,11 +105,8 @@ def main():
     em_descarregando, em_doca, em_fila, em_chegada = [], [], [], []
     lts_processados_no_report = set()
 
-    # =========================================================================
-    # PARTE 1: Processar o PÁTIO (Aba 'Report')
-    # =========================================================================
+    # --- PARTE 1: Processar o PÁTIO (Aba 'Report') ---
     raw_report = ler_aba_com_retry(planilha, 'Report', 'A1:L8000')
-    
     if raw_report:
         colunas = [str(h).strip() for h in raw_report[0]]
         df_rep = pd.DataFrame(raw_report[1:], columns=colunas)
@@ -140,11 +156,8 @@ def main():
                 elif 'fila' in status:
                     em_fila.append((minutos, linha))
 
-    # =========================================================================
-    # PARTE 2: Processar 'Deu chegada' (Com Tolerância de 10min)
-    # =========================================================================
+    # --- PARTE 2: Processar 'Deu chegada' ---
     raw_chegada_manual = ler_aba_com_retry(planilha, 'Deu chegada', 'A1:F1000')
-
     if raw_chegada_manual:
         cols_manual = [str(h).strip() for h in raw_chegada_manual[0]]
         df_manual = pd.DataFrame(raw_chegada_manual[1:], columns=cols_manual)
@@ -166,23 +179,17 @@ def main():
             
             if lt_val and pd.notna(time_val) and (lt_val not in lts_processados_no_report):
                 minutos = int((agora_br - time_val).total_seconds() / 60)
-                
-                # --- APLICAÇÃO DA TOLERÂNCIA DE 10 MINUTOS ---
                 if minutos >= 10:
                     doca = "--"
                     val_to = str(row.get(col_tos_m, '--')).strip()
                     origem = str(row.get(col_origem_m, '--')).strip()
-                    
                     eta_val = row.get(col_eta_m)
                     eta_s = eta_val.strftime('%d/%m %H:%M') if pd.notna(eta_val) else '--/-- --:--'
-                    
                     tempo = minutos_para_hhmm(minutos)
                     linha = f"{lt_val:^13} | {doca:^4} | {val_to:^7} | {eta_s:^11} | {tempo:^6} | {origem:^10}"
                     em_chegada.append((minutos, linha))
 
-    # =========================================================================
-    # PARTE 3: Processar o RESUMO (Aba 'Pendente')
-    # =========================================================================
+    # --- PARTE 3: Processar o RESUMO (Aba 'Pendente') ---
     raw_pendente = ler_aba_com_retry(planilha, 'Pendente', 'A1:F8000') 
     resumo = {'atrasado': {}, 'hoje': {}, 'amanha': {}}
     
@@ -201,7 +208,6 @@ def main():
     if raw_pendente:
         colunas_pen = [str(h).strip() for h in raw_pendente[0]]
         df_pen = pd.DataFrame(raw_pendente[1:], columns=colunas_pen)
-        
         col_saida = next((c for c in df_pen.columns if 'descarregado' in c.lower()), None)
         col_pacotes = next((c for c in df_pen.columns if 'acote' in c.lower()), 'Pacotes')
         col_to = next((c for c in df_pen.columns if c.upper() == 'TO'), 'TO')
@@ -213,11 +219,9 @@ def main():
         
         for _, row in df_pen.iterrows():
             if pd.isna(row[col_data]): continue 
-            
             if col_saida:
                 val_saida = str(row.get(col_saida, '')).strip()
-                if val_saida and val_saida.lower() not in ['nan', 'none', '']:
-                    continue 
+                if val_saida and val_saida.lower() not in ['nan', 'none', '']: continue 
 
             t = str(row.get('Turno', 'Indef')).strip().upper()
             pct = row[col_pacotes]
@@ -225,56 +229,40 @@ def main():
             d_alvo = row[col_data].date()
             
             categoria = None
-            if d_alvo < op_date_hoje: 
-                categoria = 'atrasado'
+            if d_alvo < op_date_hoje: categoria = 'atrasado'
             elif d_alvo == op_date_hoje:
                 eh_turno_passado = mapa_turnos.get(t, 99) < mapa_turnos.get(turno_atual_str, 0)
                 categoria = 'atrasado' if eh_turno_passado else 'hoje'
-            elif d_alvo == op_date_amanha: 
-                categoria = 'amanha'
+            elif d_alvo == op_date_amanha: categoria = 'amanha'
             
-            if categoria == 'atrasado' and pct == 0:
-                categoria = None
-
+            if categoria == 'atrasado' and pct == 0: categoria = None
             if categoria:
-                if t not in resumo[categoria]: 
-                    resumo[categoria][t] = {'lts': 0, 'pacotes': 0, 'tos': 0}
+                if t not in resumo[categoria]: resumo[categoria][t] = {'lts': 0, 'pacotes': 0, 'tos': 0}
                 resumo[categoria][t]['lts'] += 1
                 resumo[categoria][t]['pacotes'] += pct
                 resumo[categoria][t]['tos'] += val_to_row
 
-    # =========================================================================
-    # MONTAGEM DA MENSAGEM
-    # =========================================================================
+    # --- MONTAGEM E ENVIO ---
     for lista in [em_descarregando, em_doca, em_fila, em_chegada]:
         lista.sort(key=lambda x: x[0], reverse=True)
     
     header = f"{'LT':^13} | {'Doca':^4} | {'TO':^7} | {'ETA':^11} | {'Tempo':^6} | {'Origem':^10}"
     bloco_patio = ["Segue as LH´s com mais tempo de Pátio:\n"]
-    
     if em_descarregando:
         bloco_patio.append(f"📦 Descarregando: {len(em_descarregando)} LT(s)\n{header}")
         bloco_patio.extend([x[1] for x in em_descarregando])
-        
     if em_doca:
-        prefixo = "\n" if em_descarregando else ""
-        bloco_patio.append(f"{prefixo}🚛 Em Doca: {len(em_doca)} LT(s)\n{header}")
+        bloco_patio.append(f"\n🚛 Em Doca: {len(em_doca)} LT(s)\n{header}")
         bloco_patio.extend([x[1] for x in em_doca])
-        
     if em_fila:
-        prefixo = "\n" if (em_descarregando or em_doca) else ""
-        bloco_patio.append(f"{prefixo}🔴 Em Fila: {len(em_fila)} LT(s)\n{header}")
+        bloco_patio.append(f"\n🔴 Em Fila: {len(em_fila)} LT(s)\n{header}")
         bloco_patio.extend([x[1] for x in em_fila])
-
     if em_chegada:
-        prefixo = "\n" if (em_descarregando or em_doca or em_fila) else ""
-        bloco_patio.append(f"{prefixo}📢 Deu Chegada (Cobrar Monitoring): {len(em_chegada)} LT(s)\n{header}")
+        bloco_patio.append(f"\n📢 Deu Chegada (Cobrar Monitoring): {len(em_chegada)} LT(s)\n{header}")
         bloco_patio.extend([x[1] for x in em_chegada])
 
     bloco_resumo = []
-    str_amanha = op_date_amanha.strftime('%d/%m/%Y')
-    titulos = {'atrasado': '⚠️ Atrasados', 'hoje': '📅 Hoje', 'amanha': f'🌅 Amanhã {str_amanha}'}
-    
+    titulos = {'atrasado': '⚠️ Atrasados', 'hoje': '📅 Hoje', 'amanha': f'🌅 Amanhã {op_date_amanha.strftime("%d/%m")}'}
     for cat in ['atrasado', 'hoje', 'amanha']:
         if not resumo[cat]: continue
         total_lts = sum(d['lts'] for d in resumo[cat].values())
@@ -283,22 +271,30 @@ def main():
         bloco_resumo.append(f"{titulos[cat]}: {total_lts} LTs ({total_pct} pcts | {total_tos} TO)")
         for t in sorted(resumo[cat].keys()):
             r = resumo[cat][t]
-            bloco_resumo.append(f"   - {t}: {r['lts']} LTs ({r['pacotes']} pcts | {r['tos']} TO)")
+            bloco_resumo.append(f"    - {t}: {r['lts']} LTs ({r['pacotes']} pcts | {r['tos']} TO)")
         bloco_resumo.append("") 
 
-    txt_patio = "\n".join(bloco_patio)
-    txt_resumo = "\n".join(bloco_resumo)
-    linha_divisoria = "\n" + ("-" * 72) + "\n\n"
-    txt_completo = txt_patio + linha_divisoria + txt_resumo
-
+    txt_completo = "\n".join(bloco_patio) + "\n" + ("-" * 72) + "\n\n" + "\n".join(bloco_resumo)
+    
     print("📤 Enviando...")
     if not enviar_webhook(txt_completo):
-        enviar_webhook(txt_patio)
+        enviar_webhook("\n".join(bloco_patio))
         time.sleep(1)
-        if txt_resumo:
-            enviar_webhook(txt_resumo)
+        if bloco_resumo: enviar_webhook("\n".join(bloco_resumo))
     else:
         print("✅ Sucesso!")
 
 if __name__ == '__main__':
-    main()
+    while True:
+        # 1. Aguarda o próximo horário (XX:00 ou XX:30)
+        aguardar_proximo_intervalo()
+        
+        # 2. Executa a lógica
+        try:
+            main()
+        except Exception as e:
+            print(f"❌ Erro inesperado: {e}")
+        
+        # 3. Dorme 10 segundos apenas para garantir que não 
+        # execute duas vezes no mesmo segundo exato.
+        time.sleep(10)
