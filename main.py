@@ -115,15 +115,15 @@ def main():
                 trip = str(row.get(C_TRIP, '???')).strip()
                 doca = padronizar_doca(str(row.get(C_DOCA, '--')))
                 val_to = str(row.get(C_TO, '--')).strip()
-                origem = str(row.get(C_ORIGEM, '--')).strip() # Pega a origem (Col D)
+                origem = str(row.get(C_ORIGEM, '--')).strip() 
                 
                 eta_s = row[C_ETA].strftime('%d/%m %H:%M') if pd.notna(row[C_ETA]) else '--/-- --:--'
                 
                 minutos = int((agora_br - data_ref).total_seconds() / 60) if pd.notna(data_ref) else -999999
                 tempo = minutos_para_hhmm(minutos)
                 
-                # --- ALTERAÇÃO AQUI: Origem movida para depois da LT ---
-                linha = f"{trip:^13} | {origem:^10} | {doca:^4} | {val_to:^7} | {eta_s:^11} | {tempo:^6}"
+                # --- ALTERAÇÃO AQUI: Origem movida para O FINAL ---
+                linha = f"{trip:^13} | {doca:^4} | {val_to:^7} | {eta_s:^11} | {tempo:^6} | {origem:^10}"
                 
                 if 'descarregando' in status: em_descarregando.append((minutos, linha))
                 elif 'doca' in status: em_doca.append((minutos, linha))
@@ -198,8 +198,8 @@ def main():
     em_doca.sort(key=lambda x: x[0], reverse=True)
     em_fila.sort(key=lambda x: x[0], reverse=True)
     
-    # Cabeçalho atualizado com Origem (Col D) na posição 2
-    header = f"{'LT':^13} | {'Origem':^10} | {'Doca':^4} | {'TO':^7} | {'ETA':^11} | {'Tempo':^6}"
+    # --- ALTERAÇÃO AQUI: Header atualizado com Origem no final ---
+    header = f"{'LT':^13} | {'Doca':^4} | {'TO':^7} | {'ETA':^11} | {'Tempo':^6} | {'Origem':^10}"
     bloco_patio = ["Segue as LH´s com mais tempo de Pátio:\n"]
     
     if em_descarregando:
